@@ -74,9 +74,9 @@ def check_schema(conn: sqlite3.Connection) -> dict[str, Any]:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         missing = needed - cols
         if not cols:
-            raise HistorySchemaError(f"tabuľka {table} v state.db chýba")
+            raise HistorySchemaError(f"table {table} is missing in state.db")
         if missing:
-            raise HistorySchemaError(f"state.db.{table} nemá stĺpce {sorted(missing)} (schéma {info['version']})")
+            raise HistorySchemaError(f"state.db.{table} lacks columns {sorted(missing)} (schema {info['version']})")
         if table == "sessions":
             info["session_columns"] = cols
     return info
@@ -157,7 +157,7 @@ def import_history(
         try:
             conn = _open_ro(db)
         except sqlite3.Error as exc:
-            entry["error"] = f"state.db sa nedá otvoriť len na čítanie: {exc}"
+            entry["error"] = f"state.db cannot be opened read-only: {exc}"
             continue
         try:
             info = check_schema(conn)
@@ -201,13 +201,13 @@ def import_history(
                     entry["rows"] += len(pending) if dry_run else target.record(pending)
                     pending = []
                     if progress:
-                        progress(f"{profile}: {entry['rows']} záznamov…")
+                        progress(f"{profile}: {entry['rows']} rows…")
             if pending:
                 entry["rows"] += len(pending) if dry_run else target.record(pending)
         except HistorySchemaError as exc:
             entry["error"] = str(exc)
         except sqlite3.Error as exc:
-            entry["error"] = f"čítanie state.db zlyhalo: {exc}"
+            entry["error"] = f"reading state.db failed: {exc}"
         finally:
             conn.close()
     report["total_rows"] = sum(p["rows"] for p in report["profiles"])
@@ -215,17 +215,21 @@ def import_history(
 
 
 def render_report(report: dict[str, Any]) -> str:
-    lines = ["Import histórie do ledgeru" + (" (skúška, nič sa nezapísalo)" if report.get("dry_run") else "")]
+    try:
+        from .i18n import tr  # type: ignore[import-not-found]
+    except ImportError:  # flat layout
+        from i18n import tr  # type: ignore[no-redef]
+    lines = [tr("import.title") + (f" ({tr('import.dry_run')})" if report.get("dry_run") else "")]
     if report.get("since"):
-        lines.append("Od: " + time.strftime("%Y-%m-%d %H:%M", time.localtime(report["since"])))
+        lines.append(tr("import.since", time.strftime("%Y-%m-%d %H:%M", time.localtime(report["since"]))))
     for p in report["profiles"]:
-        lines.append(f"\nProfil {p['profile']} – {p['db']}")
+        lines.append("\n" + tr("import.profile", p["profile"], p["db"]))
         if p.get("schema_version") is not None and not p.get("schema_tested"):
-            lines.append(f"  ⚠️ schéma state.db verzia {p['schema_version']} nebola s pluginom testovaná (testované: {sorted(TESTED_SCHEMA_VERSIONS)})")
+            lines.append("  ⚠️ " + tr("import.untested_schema", p["schema_version"], sorted(TESTED_SCHEMA_VERSIONS)))
         if p.get("error"):
             lines.append(f"  ❌ {p['error']}")
             continue
-        lines.append(f"  volaní nástrojov: {p['calls']}, už v ledgeri alebo duplicitných v histórii: {p['skipped_known']}, neúspešných/bez výsledku: {p['failed']}")
-        lines.append(f"  nových záznamov: {p['rows']}  " + ", ".join(f"{k}: {v}" for k, v in sorted(p["by_tool"].items())))
-    lines.append(f"\nSpolu nových záznamov: {report['total_rows']}")
+        lines.append("  " + tr("import.counts", p["calls"], p["skipped_known"], p["failed"]))
+        lines.append("  " + tr("import.new_rows", p["rows"]) + "  " + ", ".join(f"{k}: {v}" for k, v in sorted(p["by_tool"].items())))
+    lines.append("\n" + tr("import.total", report["total_rows"]))
     return "\n".join(lines)

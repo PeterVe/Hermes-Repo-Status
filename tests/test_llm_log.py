@@ -98,10 +98,10 @@ class LlmLogTests(unittest.TestCase):
         self.assertEqual(provs["openai-codex"]["input_tokens"], 3000)
         self.assertEqual(data["sessions"][0]["session_id"], "s1")
         data["enabled"], data["capture_content"] = True, False
-        text = render.render_llm(data, label="test")
+        text = render.render_llm(data, label_text="test")
         self.assertIn("openai-codex", text)
         self.assertIn("boom", text)
-        self.assertIn("neukladá", text)
+        self.assertIn("not stored", text)
 
     def test_content_retention(self):
         log = llm_log.LlmLog(Path(self.tmp.name) / "r.db", content_retention_days=1)
@@ -159,7 +159,7 @@ class HookWiringTests(unittest.TestCase):
             config["llm_log"] = False
             ctx.hooks["post_api_request"](**post("w2"))
             self.assertEqual(len([c for c in pkg._llm.calls() if c["api_request_id"] == "w2"]), 0)
-            self.assertIn("vypnutý", ctx.cmds["repo"]("llm 24h"))
+            self.assertIn("Recording is off", ctx.cmds["repo"]("llm 24h"))
             config["llm_log"] = True
             self.assertIn("openai-codex", ctx.cmds["repo"]("llm 24h"))
             sys.modules.pop("rs_pkg_llm", None)

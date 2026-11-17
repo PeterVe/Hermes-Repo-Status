@@ -154,13 +154,13 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(files["dirty.txt"]["evidence"], "documented+observed")
         self.assertFalse(files["keep.txt"]["still_uncommitted"])
         self.assertEqual(len(repo_group["commands"]), 1)
-        text = render.render_touched(data, label="test")
-        self.assertIn("mimo cwd", text)
+        text = render.render_touched(data, label_text="test")
+        self.assertIn("outside cwd", text)
         self.assertIn("dirty.txt", text)
         self.assertIn("npm install", text)
 
     def test_render_empty(self):
-        self.assertIn("žiadne zápisy", render.render_touched({"groups": []}))
+        self.assertIn("no writes yet", render.render_touched({"groups": []}))
 
 
 class HookWiringTests(unittest.TestCase):

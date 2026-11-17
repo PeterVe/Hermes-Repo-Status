@@ -150,9 +150,9 @@ class WatchTests(unittest.TestCase):
         self.assertFalse(s1["unattributed"])
         mem = cats["memory"]["items"][0]
         self.assertTrue(mem["unattributed"])
-        text = render.render_settings(data, label="test")
+        text = render.render_settings(data, label_text="test")
         self.assertIn("Skills", text)
-        self.assertIn("pôvod neznámy", text)
+        self.assertIn("unknown origin", text)
 
     def test_touched_view_ignores_settings_tool_rows(self):
         self.led.record(ledger.build_rows("memory", {"action": "add"}, "{}", cwd=str(self.home), profile="d", session_id="s", task_id=None))

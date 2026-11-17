@@ -54,19 +54,19 @@ class EnvTests(unittest.TestCase):
         self.assertTrue(core["HERMES_YOLO_MODE"]["set"])
         self.assertTrue(core["HERMES_YOLO_MODE"]["doc"].startswith("Set to 1"))
         self.assertEqual((core["HERMES_HOME"]["value"], core["HERMES_HOME"].get("resolved")), ("C:\\h", True))
-        self.assertEqual(core["HERMES_MAX_ITERATIONS"]["default"], "500")
+        self.assertEqual(core["HERMES_MAX_ITERATIONS"]["default_code"], "500")
         other = {o["name"]: o for o in data["other"]}
         self.assertIn("TERMINAL_DOCKER_IMAGE", other)
         self.assertIn("HERMES_CUSTOM_THING", other)
         self.assertNotIn("PATH", other)
         self.assertEqual(data["hidden_secret_count"], 2)  # *_TOKEN, *_API_KEY
-        self.assertIn("vyzerá ako", other["HERMES_WEIRD"]["value"])
+        self.assertIn("looks like", other["HERMES_WEIRD"]["value"])
         dumped = json.dumps(data)
         for secret in ("TOPSECRET", "sk-abcdefghijklmnopqrstuvwxyz", "ghp_"):
             self.assertNotIn(secret, dumped)
         text = render.render_env({**data, "process": "test", "chat": {"HERMES_SESSION_ID": "s1"}}, with_docs=True)
         self.assertIn("HERMES_YOLO_MODE", text)
-        self.assertIn("Skryté", text)
+        self.assertIn("Hidden secrets", text)
         self.assertNotIn("TOPSECRET", text)
 
 

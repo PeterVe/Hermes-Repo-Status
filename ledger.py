@@ -208,7 +208,7 @@ def settings_category(path: str | None, homes: list[Path] | None = None) -> tupl
     return None
 
 
-SKILLS_CATALOG_ITEM = "(katalóg skills)"
+SKILLS_CATALOG_ITEM = "(skills-catalog)"
 
 
 def skill_name_for(path: Path) -> str:

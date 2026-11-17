@@ -123,7 +123,7 @@ class HistoryImportTests(unittest.TestCase):
         make_state_db(other, version=99).close()
         report = history_import.import_history(self.target, dbs=[("default", other)])
         self.assertFalse(report["profiles"][0]["schema_tested"])
-        self.assertIn("nebola s pluginom testovaná", history_import.render_report(report))
+        self.assertIn("was not tested with the plugin", history_import.render_report(report))
 
     def test_find_state_dbs(self):
         root = self.base / "home"

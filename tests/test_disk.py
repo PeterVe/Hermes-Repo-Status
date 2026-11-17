@@ -70,13 +70,13 @@ class DiskTests(unittest.TestCase):
         self.assertEqual(ov["scratch_size"], data["scratch_size"])
         text = render.render_disk(ov)
         self.assertIn("big-task", text)
-        self.assertIn("nič nemaže", text)
+        self.assertIn("deletes nothing", text)
 
     def test_overview_without_cache_starts_background_scan(self):
         ov = disk_usage.overview(self.home, self.led_path)
         self.assertFalse(ov["cached"])
         self.assertTrue(ov["scanning"])
-        self.assertIn("počítajú", render.render_disk(ov))
+        self.assertIn("computed in the background", render.render_disk(ov))
         deadline = time.time() + 20
         while time.time() < deadline and disk_usage.load_cached(self.led_path) is None:
             time.sleep(0.1)

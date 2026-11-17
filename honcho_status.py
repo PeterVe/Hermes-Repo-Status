@@ -61,7 +61,7 @@ def read_config(hermes_home: Path, config: dict[str, Any], host: str = "hermes")
     try:
         raw = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
-        out["config_error"] = f"honcho.json sa nedá prečítať: {type(exc).__name__}"
+        out["config_error"] = f"honcho.json cannot be read: {type(exc).__name__}"
         return out
     merged = {k: v for k, v in raw.items() if not isinstance(v, dict)}
     host_block = ((raw.get("hosts") or {}).get(host)) if isinstance(raw.get("hosts"), dict) else None
@@ -77,7 +77,7 @@ def read_config(hermes_home: Path, config: dict[str, Any], host: str = "hermes")
 def check_connection(base_url: str | None, *, timeout: float = 5.0) -> dict[str, Any]:
     """Anonymous GET of the base URL: DNS → TCP → TLS → HTTP, first failure wins."""
     if not base_url:
-        return {"ok": False, "stage": "config", "error": "baseUrl nie je nastavená"}
+        return {"ok": False, "stage": "config", "error": "baseUrl is not set"}
     started = time.time()
     req = urllib.request.Request(base_url.rstrip("/") + "/", method="GET", headers={"User-Agent": "repo-status-plugin"})
     try:
@@ -89,20 +89,20 @@ def check_connection(base_url: str | None, *, timeout: float = 5.0) -> dict[str,
     except urllib.error.URLError as exc:
         reason = exc.reason
         if isinstance(reason, ssl.SSLCertVerificationError):
-            stage, msg = "tls", f"TLS certifikát neplatný: {reason.verify_message or reason}"
+            stage, msg = "tls", f"TLS certificate invalid: {reason.verify_message or reason}"
         elif isinstance(reason, ssl.SSLError):
-            stage, msg = "tls", f"TLS chyba: {reason}"
+            stage, msg = "tls", f"TLS error: {reason}"
         elif isinstance(reason, socket.gaierror):
-            stage, msg = "dns", f"DNS: názov servera sa nedá preložiť ({reason})"
+            stage, msg = "dns", f"DNS: the server name does not resolve ({reason})"
         elif isinstance(reason, (TimeoutError, socket.timeout)):
-            stage, msg = "timeout", f"server neodpovedal do {timeout:g} s"
+            stage, msg = "timeout", f"no answer within {timeout:g} s"
         elif isinstance(reason, ConnectionRefusedError):
-            stage, msg = "tcp", "spojenie odmietnuté (server nebeží alebo zlý port)"
+            stage, msg = "tcp", "connection refused (server not running or wrong port)"
         else:
             stage, msg = "network", str(reason)
         return {"ok": False, "stage": stage, "error": _redact(msg)[:300], "ms": int((time.time() - started) * 1000)}
     except (TimeoutError, socket.timeout):
-        return {"ok": False, "stage": "timeout", "error": f"server neodpovedal do {timeout:g} s"}
+        return {"ok": False, "stage": "timeout", "error": f"no answer within {timeout:g} s"}
     except Exception as exc:  # never break the panel
         return {"ok": False, "stage": "error", "error": _redact(f"{type(exc).__name__}: {exc}")[:300]}
 

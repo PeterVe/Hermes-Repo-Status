@@ -20,6 +20,7 @@ import {
   Tip,
   queryClient,
   useQuery,
+  usePluginI18n,
   useValue
 } from '@hermes/plugin-sdk'
 import { useEffect, useRef, useState } from 'react'
@@ -33,33 +34,50 @@ let api = null // set in register(): { rest, openExternal, revealPath, runAction
 
 const KIND_ICON = { github: 'github', gitlab: 'source-control', forgejo: 'source-control', local: 'folder', other: 'globe' }
 
-const REMOTE_STATUS = {
-  up_to_date: ['good', 'aktuálny'],
-  local_ahead: ['warn', 'treba push'],
-  behind: ['bad', 'server má novšie'],
-  diverged: ['bad', 'rozišlo sa so serverom'],
-  remote_newer: ['bad', 'server má novšie'],
-  not_on_remote: ['warn', 'vetva nie je na serveri'],
-  no_upstream: ['warn', 'bez upstreamu'],
-  detached: ['warn', 'odpojený HEAD'],
-  no_remote: ['muted', 'bez remote'],
-  skipped: ['muted', 'neoverené'],
-  not_a_repo: ['muted', '—'],
-  error: ['warn', 'server neoverený']
+const REMOTE_TONE = {
+  up_to_date: 'good', local_ahead: 'warn', behind: 'bad', diverged: 'bad', remote_newer: 'bad', not_on_remote: 'warn',
+  no_upstream: 'warn', detached: 'warn', no_remote: 'muted', skipped: 'muted', not_a_repo: 'muted', error: 'warn'
 }
 
-const REASONS = {
-  uncommitted: 'necommitnuté zmeny',
-  unpushed: 'nepushnuté commity',
-  server_newer: 'server má novšie zmeny',
-  not_on_remote: 'vetva nie je na serveri',
-  no_upstream: 'chýba upstream',
-  remote_unreachable: 'server neoverený',
-  conflicts: 'konflikty'
+// ── i18n: one catalog per Hermes language (locales/<lang>.json, served by GET /i18n) ──
+// English ships inline (EN at the bottom of this file) so the panel never shows raw keys;
+// the other languages arrive from the backend and register on top. Plain strings carry
+// positional {0}, {1} placeholders; the Desktop translator wants functions for those.
+
+/** Translate a catalog key with positional args (follows the app's display language). */
+function T(key, ...args) {
+  if (api?.t) return api.t(key, ...args)
+  const v = EN[key]
+  return v == null ? key : format(v, args)
 }
 
-const SCOPES = { local: 'lokálne', global: 'globálne', system: 'systémovo', worktree: 'worktree' }
-const ACTIONS = { write: 'zápis', patch: 'úprava', create: 'nový', delete: 'zmazaný' }
+/** Label for a code (`remote_short.up_to_date`); an unknown code shows as itself. */
+function L(prefix, code) {
+  if (code == null || code === '') return '—'
+  const key = `${prefix}.${code}`
+  const text = T(key)
+  return text === key ? String(code) : text
+}
+
+function format(text, args) {
+  return String(text).replace(/\{(\d+)\}/g, (_m, i) => (args[Number(i)] ?? '').toString())
+}
+
+/** Flat dotted catalog → nested message tree with {n} strings turned into functions. */
+function toMessages(flat) {
+  const out = {}
+  for (const [key, value] of Object.entries(flat || {})) {
+    if (key.startsWith('_') || typeof value !== 'string') continue
+    const parts = key.split('.')
+    let node = out
+    for (const part of parts.slice(0, -1)) {
+      if (typeof node[part] !== 'object' || node[part] === null) node[part] = {}
+      node = node[part]
+    }
+    node[parts[parts.length - 1]] = /\{\d+\}/.test(value) ? (...args) => format(value, args) : value
+  }
+  return out
+}
 
 // ── data ────────────────────────────────────────────────────────────────────
 
@@ -80,7 +98,7 @@ async function refreshAll(cwd, fresh) {
     try {
       queryClient.setQueryData(remoteKey(cwd), await fetchRemote(cwd, true))
     } catch (error) {
-      host.notifyError(error, 'Repo Status: server sa nepodarilo overiť')
+      host.notifyError(error, T('ui.server_check_failed'))
     }
   } else {
     await queryClient.invalidateQueries({ queryKey: remoteKey(cwd) })
@@ -234,14 +252,25 @@ function summarize(p, rc) {
 // ── formatting ──────────────────────────────────────────────────────────────
 
 function ago(iso) {
-  if (!iso) return 'nikdy'
+  if (!iso) return T('time.never')
   const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000))
-  if (s < 90) return `pred ${s} s`
+  if (s < 90) return T('time.seconds_ago', s)
   const m = Math.round(s / 60)
-  if (m < 90) return `pred ${m} min`
+  if (m < 90) return T('time.minutes_ago', m)
   const h = Math.round(m / 60)
-  if (h < 48) return `pred ${h} h`
-  return `pred ${Math.round(h / 24)} d`
+  if (h < 48) return T('time.hours_ago', h)
+  return T('time.days_ago', Math.round(h / 24))
+}
+
+/** Compact age without "ago" (session rows): 5 min · 3 h · 2 d. */
+function age(iso) {
+  if (!iso) return '—'
+  const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000))
+  if (s < 90) return `${s} s`
+  const m = Math.round(s / 60)
+  if (m < 90) return `${m} min`
+  const h = Math.round(m / 60)
+  return h < 48 ? `${h} h` : `${Math.round(h / 24)} d`
 }
 
 function clock(ts) {
@@ -265,7 +294,7 @@ const MARKER_CLASS = { '?': 'text-emerald-500', A: 'text-emerald-500', D: 'text-
 // (the desktop half reloads on Rescan, the backend only on a gateway restart).
 function errText(error) {
   const msg = String(error?.message || error || '')
-  if (/\b404\b|not found/i.test(msg)) return 'Backend pluginu je starší než panel – reštartujte Hermes gateway.'
+  if (/\b404\b|not found/i.test(msg)) return T('ui.backend_outdated')
   return msg
 }
 
@@ -311,7 +340,7 @@ function Field({ label, children, more, defaultOpen = false, actions }) {
           jsxs('div', {
             className: 'flex min-w-0 flex-1 items-start gap-1',
             children: [
-              more ? jsx(Chevron, { open, onToggle: () => setOpen(!open), label: open ? 'Zbaliť' : 'Rozbaliť' }) : null,
+              more ? jsx(Chevron, { open, onToggle: () => setOpen(!open), label: open ? T('ui.collapse') : T('ui.expand') }) : null,
               jsx('div', { className: 'min-w-0 flex-1 text-(--ui-text-secondary)', children })
             ]
           }),
@@ -330,7 +359,7 @@ function FolderLink({ path, git, mono = true, title, max = 40 }) {
     children: [
       jsx('button', {
         type: 'button',
-        title: title || `Otvoriť v Prieskumníkovi: ${path}`,
+        title: title || T('ui.open_in_explorer', path),
         onClick: () => void api?.revealPath(path),
         className: `min-w-0 truncate text-left ${mono ? 'font-mono text-[0.6875rem]' : ''} text-foreground underline decoration-dotted underline-offset-2 hover:text-sky-500`,
         children: tailPath(path, max) // the end of a path tells folders apart; the tooltip has it all
@@ -389,7 +418,7 @@ function ProjectSection({ project, gitByPath, repoRoot, cwd, cwdSource }) {
   return jsxs(Section, {
     children: [
       jsx(Field, {
-        label: project ? 'Primary folder' : 'Priečinok',
+        label: project ? T('ui.primary_folder') : T('ui.folder'),
         more: rest.length
           ? rest.map(f =>
               jsx(
@@ -410,12 +439,12 @@ function ProjectSection({ project, gitByPath, repoRoot, cwd, cwdSource }) {
       jsx(FilesSection, { folder: repoRoot || first.path }),
       repoRoot && !folders.some(f => f.path.toLowerCase() === repoRoot.toLowerCase())
         ? jsx(Field, {
-            label: 'Git repo chatu',
+            label: T('ui.chat_git_repo'),
             children: jsxs('span', {
               className: 'inline-flex min-w-0 max-w-full items-center gap-1',
               children: [
                 jsx(FolderLink, { path: repoRoot, git: true }),
-                cwdSource === 'stored' ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: '· uložený adresár' }) : null
+                cwdSource === 'stored' ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `· ${T('ui.stored_folder')}` }) : null
               ]
             })
           })
@@ -426,7 +455,7 @@ function ProjectSection({ project, gitByPath, repoRoot, cwd, cwdSource }) {
 
 function RemoteSection({ data }) {
   const remotes = data.remotes || []
-  if (!remotes.length) return jsx(Field, { label: 'External repo', children: 'žiadne (len lokálne)' })
+  if (!remotes.length) return jsx(Field, { label: T('ui.external_repo'), children: T('repo.no_remote') })
   const [first, ...rest] = remotes
   const line = r =>
     jsxs('span', {
@@ -439,7 +468,7 @@ function RemoteSection({ data }) {
       ]
     })
   return jsx(Field, {
-    label: 'External repo',
+    label: T('ui.external_repo'),
     more: rest.length ? rest.map(r => jsx('div', { className: 'text-xs', children: line(r) }, r.name)) : null,
     children: line(first)
   })
@@ -450,21 +479,21 @@ function GitSection({ data, remoteCheck }) {
   const lc = data.last_commit
   const id = data.identity || {}
   const scope = (id.email || id.name || {}).scope
-  const [tone, text] = remoteCheck?.status === 'checking' ? ['muted', 'overujem…'] : REMOTE_STATUS[remoteCheck?.status] || ['muted', '—']
+  const [tone, text] = remoteCheck?.status === 'checking' ? ['muted', T('ui.checking')] : remoteCheck?.status ? [REMOTE_TONE[remoteCheck.status] || 'muted', L('remote_short', remoteCheck.status)] : ['muted', '—']
   const counts = []
   if (remoteCheck?.ahead) counts.push(`↑${remoteCheck.ahead}`)
   if (remoteCheck?.behind) counts.push(`↓${remoteCheck.behind}`)
   return jsxs('div', {
     children: [
       jsx(Field, {
-        label: 'Vetva',
+        label: T('repo.branch'),
         more: [
           lc
             ? jsx('div', { className: 'truncate text-[0.6875rem]', title: `${lc.oid}\n${lc.author} <${lc.email}>\n${lc.date}`, children: [jsx(Mono, { children: lc.short }, 'o'), ` ${lc.subject} · ${lc.author} · ${ago(lc.date)}`] }, 'lc')
-            : jsx('div', { className: 'text-[0.6875rem]', children: 'zatiaľ žiadny commit' }, 'lc'),
+            : jsx('div', { className: 'text-[0.6875rem]', children: T('repo.no_commit') }, 'lc'),
           remoteCheck?.error ? jsx('div', { className: 'text-[0.6875rem] text-destructive', children: remoteCheck.error }, 'err') : null,
           (data.remotes || []).length
-            ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `overené ${remoteCheck?.checked_at ? ago(remoteCheck.checked_at) : '—'} · posledný fetch ${ago(data.fetch?.last_fetch)}` }, 'f')
+            ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: T('ui.checked_and_fetch', remoteCheck?.checked_at ? ago(remoteCheck.checked_at) : '—', ago(data.fetch?.last_fetch)) }, 'f')
             : null,
           (data.repo?.worktrees || []).length > 1
             ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `worktrees: ${data.repo.worktrees.map(w => w.branch || (w.head || '').slice(0, 7)).join(', ')}` }, 'wt')
@@ -482,17 +511,17 @@ function GitSection({ data, remoteCheck }) {
         })
       }),
       jsx(Field, {
-        label: 'Git user',
+        label: T('ui.git_user'),
         children:
           id.name || id.email
             ? jsxs('span', {
                 children: [
                   jsx('span', { className: 'text-foreground', children: id.name?.value || '?' }),
                   ` <${id.email?.value || '?'}>`,
-                  jsx('span', { className: 'text-(--ui-text-tertiary)', children: ` · ${SCOPES[scope] || scope || ''}` })
+                  jsx('span', { className: 'text-(--ui-text-tertiary)', children: ` · ${L('gitscope', scope)}` })
                 ]
               })
-            : jsx('span', { className: 'text-destructive', children: 'nenastavený' })
+            : jsx('span', { className: 'text-destructive', children: T('ui.not_set') })
       })
     ]
   })
@@ -506,17 +535,17 @@ function WorkFilesSection({ data }) {
   const dirs = Object.entries(wf.dirs || {})
   const root = data.repo?.root || ''
   return jsx(Field, {
-    label: 'Pracovné Hermes',
+    label: T('ui.work_files'),
     more: [
-      jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: 'Plány, náčrty a podklady Hermesa v repe. Nie sú to zmeny kódu a nepočítajú sa do „všetko commitnuté“.' }, 'note'),
+      jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: T('ui.work_files_note') }, 'note'),
       ...(wf.files || []).map(f => jsx(FileLine, { f }, f.path)),
-      wf.truncated ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `… a ďalších ${wf.truncated}` }, 'more') : null
+      wf.truncated ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `… ${T('common.and_more', wf.truncated)}` }, 'more') : null
     ],
     children: jsxs('span', {
       className: 'inline-flex min-w-0 max-w-full items-center gap-1.5 text-[0.6875rem]',
       children: [
         jsx('span', { className: 'shrink-0 font-medium text-(--ui-text-secondary)', children: wf.total }),
-        ...dirs.map(([d]) => jsx(FolderLink, { path: root ? `${root}\\${d.replace(/\/$/, '').replace(/\//g, '\\')}` : d, title: `Otvoriť ${d} v Prieskumníkovi` }, d))
+        ...dirs.map(([d]) => jsx(FolderLink, { path: root ? `${root}\\${d.replace(/\/$/, '').replace(/\//g, '\\')}` : d, title: T('ui.open_in_explorer', d) }, d))
       ]
     })
   })
@@ -528,31 +557,31 @@ function UncommittedSection({ data }) {
   const files = ch.files || []
   const stat = new Map((ds.files || []).map(f => [f.path, f]))
   if (!ch.total) {
-    const clean = data.work_files?.total ? 'žiadne zmeny kódu' : 'žiadne – pracovný strom je čistý'
-    return jsx(Field, { label: 'Uncommitted', children: jsx('span', { className: 'text-emerald-500', children: clean }) })
+    const clean = data.work_files?.total ? T('ui.no_code_changes') : T('ui.tree_clean')
+    return jsx(Field, { label: T('ui.uncommitted'), children: jsx('span', { className: 'text-emerald-500', children: clean }) })
   }
   const parts = [
-    ch.staged ? `${ch.staged} staged` : null,
-    ch.unstaged ? `${ch.unstaged} zmenené` : null,
-    ch.untracked ? `${ch.untracked} nové` : null,
-    ch.conflicted ? `${ch.conflicted} konflikty` : null
+    ch.staged ? `${ch.staged} ${T('changes.staged')}` : null,
+    ch.unstaged ? `${ch.unstaged} ${T('changes.unstaged')}` : null,
+    ch.untracked ? `${ch.untracked} ${T('changes.untracked')}` : null,
+    ch.conflicted ? `${ch.conflicted} ${T('changes.conflicted')}` : null
   ].filter(Boolean)
   return jsx(Field, {
-    label: 'Uncommitted',
+    label: T('ui.uncommitted'),
     actions: jsx(Tip, {
-      label: 'Diff v Review paneli',
+      label: T('ui.diff_in_review'),
       children: jsx(Button, {
         variant: 'ghost',
         size: 'icon-xs',
-        'aria-label': 'Otvoriť diff',
+        'aria-label': T('ui.open_diff'),
         onClick: () => api?.runAction('view.toggleReview'),
         children: jsx(Codicon, { name: 'diff', size: '0.8rem' })
       })
     }),
     more: [
-      jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `${parts.join(' · ')}${ds.count ? ` · +${ds.added} −${ds.removed} riadkov` : ''}` }, 'sum'),
+      jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `${parts.join(' · ')}${ds.count ? ` · ${T('ui.lines_changed', ds.added, ds.removed)}` : ''}` }, 'sum'),
       ...files.map(f => jsx(FileLine, { f, stat: stat.get(f.path) }, f.path)),
-      ch.truncated ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `… a ďalších ${ch.truncated}` }, 'more') : null
+      ch.truncated ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `… ${T('common.and_more', ch.truncated)}` }, 'more') : null
     ],
     children: jsxs('span', {
       className: 'inline-flex min-w-0 max-w-full items-center gap-1.5',
@@ -568,11 +597,11 @@ function UncommittedSection({ data }) {
 
 function TouchedGroup({ group }) {
   const files = group.files || []
-  const title = group.in_repo ? group.root : 'Mimo git'
+  const title = group.in_repo ? group.root : T('common.outside_git_short')
   const label = jsxs('span', {
     className: 'inline-flex items-center gap-1',
     children: [
-      group.outside_cwd ? jsx(Tip, { label: 'Mimo pracovného adresára chatu', children: jsx(Codicon, { name: 'warning', size: '0.75rem', className: 'text-amber-500' }) }) : null,
+      group.outside_cwd ? jsx(Tip, { label: T('ui.outside_chat_folder'), children: jsx(Codicon, { name: 'warning', size: '0.75rem', className: 'text-amber-500' }) }) : null,
       `${group.file_count}✍ ${group.probable || 0}⌨`
     ]
   })
@@ -581,13 +610,13 @@ function TouchedGroup({ group }) {
       'div',
       {
         className: 'flex min-w-0 items-center gap-1.5 text-[0.6875rem]',
-        title: `${f.path}\n${f.tools.join(', ')} · ${f.evidence}${f.path_guessed ? ' · cesta odhadnutá' : ''}`,
+        title: `${f.path}\n${f.tools.join(', ')} · ${f.evidence}${f.path_guessed ? ` · ${T('touched.path_guessed')}` : ''}`,
         children: [
           jsx(StatusDot, { tone: f.still_uncommitted ? 'warn' : f.still_uncommitted === false ? 'good' : 'muted' }),
           group.in_repo
             ? jsx('span', { className: 'min-w-0 flex-1 truncate font-mono text-foreground', children: f.rel_path || f.path })
             : jsx('span', { className: 'min-w-0 flex-1', children: jsx(FolderLink, { path: f.path }) }),
-          jsx('span', { className: 'shrink-0 text-(--ui-text-tertiary)', children: `${f.actions.map(a => ACTIONS[a] || a).join('/')} ${clock(f.last_ts)}` })
+          jsx('span', { className: 'shrink-0 text-(--ui-text-tertiary)', children: `${f.actions.map(a => L('action', a)).join('/')} ${clock(f.last_ts)}` })
         ]
       },
       f.path
@@ -597,13 +626,13 @@ function TouchedGroup({ group }) {
     defaultOpen: false,
     more: [
       ...files.map(fileRow),
-      group.file_count > files.length ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `… a ďalších ${group.file_count - files.length}` }, 'more') : null,
+      group.file_count > files.length ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `… ${T('common.and_more', group.file_count - files.length)}` }, 'more') : null,
       ...(group.commands || []).slice(0, 5).map((c, i) =>
         jsxs(
           'div',
           {
             className: 'flex min-w-0 items-center gap-1.5 text-[0.6875rem] text-(--ui-text-tertiary)',
-            title: `${c.tool} · pravdepodobné – zmenené súbory nevieme určiť${c.folder ? `\n${c.folder}` : ''}`,
+            title: `${c.tool} · ${T('touched.probable_note')}${c.folder ? `\n${c.folder}` : ''}`,
             children: [
               jsx(Codicon, { name: 'terminal', size: '0.7rem' }),
               jsx('span', { className: 'min-w-0 flex-1 truncate font-mono', children: c.detail || c.tool }),
@@ -622,7 +651,7 @@ function TouchedGroup({ group }) {
       : jsxs('span', {
           className: 'flex min-w-0 max-w-full items-center gap-1.5',
           children: [
-            jsx('span', { className: 'shrink-0 whitespace-nowrap font-medium text-foreground', children: 'Mimo git' }),
+            jsx('span', { className: 'shrink-0 whitespace-nowrap font-medium text-foreground', children: T('common.outside_git_short') }),
             files[0] ? jsx('span', { className: 'min-w-0 truncate font-mono text-[0.6875rem] text-(--ui-text-tertiary)', title: files[0].path, children: files[0].path }) : null
           ]
         })
@@ -650,14 +679,14 @@ function HermesChanges({ cwd }) {
   const groups = query.data?.groups || []
   const outside = groups.filter(g => g.outside_cwd).length
   return jsxs(Section, {
-    title: 'Kam zapisoval Hermes',
+    title: T('touched.title'),
     children: [
       jsxs('div', {
         className: 'mb-1 flex items-center gap-1 text-[0.6875rem]',
         children: [
           ...[
-            ['session', 'Tento chat'],
-            ['all', 'Všetko 24 h']
+            ['session', T('ui.this_chat')],
+            ['all', T('ui.all_24h')]
           ].map(([value, label]) =>
             jsx(
               'button',
@@ -670,7 +699,7 @@ function HermesChanges({ cwd }) {
               value
             )
           ),
-          outside ? jsx('span', { className: 'ml-auto text-amber-500', children: `⚠ ${outside} mimo cwd` }) : null
+          outside ? jsx('span', { className: 'ml-auto text-amber-500', children: `⚠ ${T('ui.outside_cwd_count', outside)}` }) : null
         ]
       }),
       query.isLoading
@@ -678,28 +707,24 @@ function HermesChanges({ cwd }) {
         : query.isError
           ? jsx('div', { className: 'text-xs text-amber-500', children: errText(query.error) })
           : !groups.length
-            ? jsx('div', { className: 'text-xs text-(--ui-text-tertiary)', children: scope === 'session' ? 'V tomto chate Hermes zatiaľ nič nezapísal.' : 'Za posledných 24 h žiadne zápisy.' })
+            ? jsx('div', { className: 'text-xs text-(--ui-text-tertiary)', children: scope === 'session' ? T('ui.touched_empty_chat') : T('ui.touched_empty_24h') })
             : jsx('div', { children: groups.map(g => jsx(TouchedGroup, { group: g }, g.root || 'none')) })
     ]
   })
 }
 
-// ── F3: Nastavenia Hermesa (skills, pamäť, cron, config, SOUL, pluginy) ────
+// ── Hermes settings (skills, memory, cron, config, SOUL, plugins) ──────────
 
-const SETTINGS_ACTIONS = {
-  create: 'nový', modify: 'zmenený', delete: 'zmazaný', patch: 'úprava', edit: 'úprava', write_file: 'zápis', write: 'zápis',
-  add: 'pridané', remove: 'odstránené', replace: 'nahradené', update: 'zmena', pause: 'pozastavené', resume: 'obnovené', run: 'spustené'
-}
 
 function SettingsItem({ it }) {
-  const who = it.by_hermes ? ['good', 'Hermes'] : it.unattributed ? ['warn', 'pôvod neznámy'] : ['muted', 'Hermes (súbor)']
+  const who = it.by_hermes ? ['good', 'Hermes'] : it.unattributed ? ['warn', T('settings.unknown_origin')] : ['muted', T('settings.hermes_file')]
   return jsxs('div', {
     className: 'flex min-w-0 items-center gap-1.5 text-[0.6875rem]',
     title: [...(it.details || []), it.sessions?.length ? `sessions: ${it.sessions.join(', ')}` : ''].filter(Boolean).join('\n'),
     children: [
       jsx(StatusDot, { tone: who[0] }),
       jsx('span', { className: 'min-w-0 flex-1 truncate font-mono text-foreground', children: it.item }),
-      jsx('span', { className: 'shrink-0 text-(--ui-text-tertiary)', children: `${it.actions.map(a => SETTINGS_ACTIONS[a] || a).join('/')} · ${who[1]} · ${clock(it.last_ts)}` })
+      jsx('span', { className: 'shrink-0 text-(--ui-text-tertiary)', children: `${it.actions.map(a => L('settings_action', a)).join('/')} · ${who[1]} · ${clock(it.last_ts)}` })
     ]
   })
 }
@@ -721,14 +746,14 @@ function HermesSettings() {
   }, [busy])
   const cats = query.data?.categories || []
   return jsxs(Section, {
-    title: 'Nastavenia Hermesa',
+    title: T('settings.section'),
     children: [
       jsx('div', {
         className: 'mb-1 flex items-center gap-1 text-[0.6875rem]',
         children: [
           [24, '24 h'],
-          [168, '7 dní'],
-          [720, '30 dní']
+          [168, T('ui.days_n', 7)],
+          [720, T('ui.days_n', 30)]
         ].map(([value, label]) =>
           jsx(
             'button',
@@ -747,21 +772,21 @@ function HermesSettings() {
         : query.isError
           ? jsx('div', { className: 'text-xs text-amber-500', children: errText(query.error) })
           : !cats.length
-            ? jsx('div', { className: 'text-xs text-(--ui-text-tertiary)', children: 'Žiadne zmeny skills, pamäte, cron, config ani pluginov.' })
+            ? jsx('div', { className: 'text-xs text-(--ui-text-tertiary)', children: T('settings.empty') })
             : jsx('div', {
                 children: cats.map(c =>
                   jsx(
                     Field,
                     {
-                      label: `${c.label} (${c.item_count})`,
+                      label: `${L('category', c.category)} (${c.item_count})`,
                       more: [
                         ...c.items.map(it => jsx(SettingsItem, { it }, it.item)),
-                        c.item_count > c.items.length ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `… a ďalších ${c.item_count - c.items.length}` }, 'more') : null
+                        c.item_count > c.items.length ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `… ${T('common.and_more', c.item_count - c.items.length)}` }, 'more') : null
                       ],
                       children: jsxs('span', {
                         className: 'inline-flex min-w-0 max-w-full items-center gap-1.5',
                         children: [
-                          c.items.some(i => i.unattributed) ? jsx(Tip, { label: 'Niektoré zmeny nemajú doložené volanie nástroja Hermesa', children: jsx(Codicon, { name: 'warning', size: '0.75rem', className: 'text-amber-500' }) }) : null,
+                          c.items.some(i => i.unattributed) ? jsx(Tip, { label: T('ui.some_unattributed'), children: jsx(Codicon, { name: 'warning', size: '0.75rem', className: 'text-amber-500' }) }) : null,
                           jsx('span', { className: 'min-w-0 truncate font-mono text-[0.6875rem] text-foreground', children: c.items[0]?.item }),
                           jsx('span', { className: 'shrink-0 text-[0.6875rem] text-(--ui-text-tertiary)', children: clock(c.items[0]?.last_ts || 0) })
                         ]
@@ -775,14 +800,18 @@ function HermesSettings() {
   })
 }
 
-// ── F5: Súbory, External communication, Sessions ────────────────────────────
+// ── Files, external communication, sessions ────────────────────────────
 
 const SOURCE_LABELS = {
-  local: 'Desktop', desktop: 'Desktop', cli: 'Terminál', tui: 'Terminál', discord: 'Discord', telegram: 'Telegram', slack: 'Slack',
+  local: 'Desktop', desktop: 'Desktop', cli: 'CLI', tui: 'TUI', discord: 'Discord', telegram: 'Telegram', slack: 'Slack',
   teams: 'Teams', whatsapp: 'WhatsApp', signal: 'Signal', matrix: 'Matrix', email: 'E-mail', cron: 'Cron', api: 'API',
   acp: 'IDE (ACP)', webhook: 'Webhook', kanban: 'Kanban', subagent: 'Subagent', delegate: 'Subagent'
 }
-const sourceLabel = s => SOURCE_LABELS[(s || '').toLowerCase()] || s || '—'
+const sourceLabel = s => {
+  const code = (s || '').toLowerCase()
+  const text = T(`source.${code}`)
+  return text !== `source.${code}` ? text : SOURCE_LABELS[code] || s || '—'
+}
 
 function fmtSize(n) {
   if (n == null) return ''
@@ -807,11 +836,11 @@ function DirEntry({ e, depth }) {
         className: 'flex min-w-0 items-center gap-1 text-[0.6875rem]',
         style: { paddingLeft: `${depth * 0.75}rem` },
         children: [
-          e.dir ? jsx(Chevron, { open, onToggle: () => setOpen(!open), label: open ? 'Zbaliť' : 'Rozbaliť' }) : jsx('span', { className: 'inline-block w-4 shrink-0' }),
+          e.dir ? jsx(Chevron, { open, onToggle: () => setOpen(!open), label: open ? T('ui.collapse') : T('ui.expand') }) : jsx('span', { className: 'inline-block w-4 shrink-0' }),
           jsx(Codicon, { name: e.dir ? (open ? 'folder-opened' : 'folder') : 'file', size: '0.75rem', className: 'shrink-0 text-(--ui-text-tertiary)' }),
           jsx('button', {
             type: 'button',
-            title: `${e.path}\nKlik: otvoriť v Prieskumníkovi`,
+            title: `${e.path}\n${T('ui.click_open_explorer')}`,
             onClick: () => void api?.revealPath(e.path),
             className: `min-w-0 flex-1 truncate text-left font-mono hover:text-sky-500 ${e.hidden ? 'text-(--ui-text-tertiary)' : 'text-foreground'}`,
             children: e.name
@@ -833,8 +862,8 @@ function DirList({ path, depth = 0 }) {
   return jsxs('div', {
     children: [
       ...d.entries.map(e => jsx(DirEntry, { e, depth }, e.path)),
-      d.truncated ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', style: { paddingLeft: `${depth * 0.75}rem` }, children: `… a ďalších ${d.truncated}` }) : null,
-      !d.entries.length ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: 'prázdny priečinok' }) : null
+      d.truncated ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', style: { paddingLeft: `${depth * 0.75}rem` }, children: `… ${T('common.and_more', d.truncated)}` }) : null,
+      !d.entries.length ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: T('ui.empty_folder') }) : null
     ]
   })
 }
@@ -844,13 +873,13 @@ function FilesSection({ folder }) {
   if (!folder) return null
   const d = query.data
   return jsx(Field, {
-    label: 'Súbory',
+    label: T('ui.files'),
     more: [jsx(DirList, { path: folder }, 'root')],
     children: jsxs('span', {
       className: 'inline-flex min-w-0 max-w-full items-center gap-1.5 text-[0.6875rem]',
       children: [
         jsx(FolderLink, { path: folder }),
-        d?.ok ? jsx('span', { className: 'shrink-0 text-(--ui-text-tertiary)', children: `${d.count} položiek` }) : null
+        d?.ok ? jsx('span', { className: 'shrink-0 text-(--ui-text-tertiary)', children: T('ui.items_count', d.count) }) : null
       ]
     })
   })
@@ -891,12 +920,12 @@ function useSessionsMeta(ids) {
 }
 
 function CapacityBar({ ctx }) {
-  if (!ctx?.used) return jsx('span', { className: 'shrink-0 text-(--ui-text-tertiary)', title: 'Kapacita sa zaznamenáva od F4 (volania LLM po zapnutí)', children: '—' })
+  if (!ctx?.used) return jsx('span', { className: 'shrink-0 text-(--ui-text-tertiary)', title: T('ui.capacity_unknown'), children: '—' })
   const pct = ctx.max ? Math.min(100, Math.round((ctx.used / ctx.max) * 100)) : null
   const tone = pct == null ? 'bg-(--ui-text-tertiary)' : pct >= 85 ? 'bg-red-500' : pct >= 60 ? 'bg-amber-500' : 'bg-emerald-500'
   return jsxs('span', {
     className: 'inline-flex shrink-0 items-center gap-1 tabular-nums',
-    title: `Kontext: ${ctx.used.toLocaleString()} / ${ctx.max ? ctx.max.toLocaleString() : '?'} tokenov (posledné volanie, ${clock(ctx.ts)})`,
+    title: T('ui.capacity_tip', ctx.used.toLocaleString(), ctx.max ? ctx.max.toLocaleString() : '?', clock(ctx.ts)),
     children: [
       jsx('span', { className: 'relative inline-block h-1.5 w-8 overflow-hidden rounded bg-(--ui-border)', children: jsx('span', { className: `absolute inset-y-0 left-0 ${tone}`, style: { width: `${pct ?? 100}%` } }) }),
       jsx('span', { className: 'text-(--ui-text-tertiary)', children: `${tok(ctx.used)}/${ctx.max ? tok(ctx.max) : '?'}` })
@@ -920,18 +949,18 @@ function SessionRow({ s, meta, current }) {
           jsx('button', {
             type: 'button',
             onClick: open,
-            title: `${s.title || s.id}\n${s.id}\nKlik: prepnúť na túto session`,
+            title: `${s.title || s.id}\n${s.id}\n${T('ui.click_switch_session')}`,
             className: 'min-w-0 flex-1 truncate text-left text-foreground hover:text-sky-500',
             children: s.title || s.preview || s.id
           }),
           jsx(CapacityBar, { ctx: meta?.context }),
-          jsx('span', { className: 'w-12 shrink-0 text-right text-(--ui-text-tertiary)', children: ago(new Date((s.last_active || s.started_at || 0) * 1000).toISOString()).replace('pred ', '') })
+          jsx('span', { className: 'w-12 shrink-0 text-right text-(--ui-text-tertiary)', children: age(new Date((s.last_active || s.started_at || 0) * 1000).toISOString()) })
         ]
       }),
       jsx('div', {
         className: 'truncate pl-3.5 text-[0.625rem] text-(--ui-text-tertiary)',
         title: providers.map(p => `${p.provider}/${p.model} – ${p.calls}×`).join('\n'),
-        children: [sourceLabel(s.handoff_platform || s.source), s.lane ? `vetva ${s.lane}` : null, provText || null].filter(Boolean).join(' · ')
+        children: [sourceLabel(s.handoff_platform || s.source), s.lane ? T('ui.branch_lane', s.lane) : null, provText || null].filter(Boolean).join(' · ')
       })
     ]
   })
@@ -952,15 +981,15 @@ function SessionsSection({ project }) {
   return jsxs('div', {
     children: [
       jsx(Field, {
-        label: `Sessions (${sessions.length})`,
+        label: `${T('ui.sessions')} (${sessions.length})`,
         more: [
           jsx(
             'div',
             {
               className: 'mb-1 flex items-center gap-1 text-[0.6875rem]',
               children: [
-                ['project', 'Projekt'],
-                ['all', 'Všetky']
+                ['project', T('ui.scope_project')],
+                ['all', T('ui.scope_all')]
               ].map(([value, label]) =>
                 jsx(
                   'button',
@@ -980,7 +1009,7 @@ function SessionsSection({ project }) {
           list.isLoading ? jsx(Skeleton, { className: 'h-3' }, 'sk') : null,
           list.isError ? jsx('div', { className: 'text-[0.6875rem] text-amber-500', children: errText(list.error) }, 'err') : null,
           ...sessions.slice(0, 60).map(s => jsx(SessionRow, { s, meta: meta[s.id], current: s.id === storedId }, s.id)),
-          sessions.length > 60 ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `… a ďalších ${sessions.length - 60}` }, 'more') : null
+          sessions.length > 60 ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `… ${T('common.and_more', sessions.length - 60)}` }, 'more') : null
         ],
         children: first
           ? jsxs('span', {
@@ -990,7 +1019,7 @@ function SessionsSection({ project }) {
                 jsx(CapacityBar, { ctx: meta[first.id]?.context })
               ]
             })
-          : jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: list.isLoading ? '…' : 'žiadne' })
+          : jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: list.isLoading ? '…' : T('common.none') })
       })
     ]
   })
@@ -1012,21 +1041,21 @@ function ExternalSection({ project }) {
   const providers = meta?.providers || []
   const chatSource = current ? sourceLabel(current.handoff_platform || current.source) : null
   return jsx(Field, {
-    label: 'External comm.',
+    label: T('ui.external_comm'),
     more: [
-      jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `Tento chat: ${chatSource || 'neznámy zdroj'}${current?.handoff_platform && current?.source && current.handoff_platform !== current.source ? ` (pôvodne ${sourceLabel(current.source)})` : ''}` }, 'src'),
+      jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: T('ui.chat_source', chatSource || T('ui.unknown_source')) + (current?.handoff_platform && current?.source && current.handoff_platform !== current.source ? ` (${T('ui.originally', sourceLabel(current.source))})` : '') }, 'src'),
       ...chans.map(c =>
         jsxs(
           'div',
           {
             className: 'flex min-w-0 items-center gap-1.5 text-[0.6875rem]',
-            title: `${c.label} kanál ${c.channel_id}\n${c.summary}`,
+            title: `${c.label} · ${c.channel_id}\n${c.summary}`,
             children: [
               jsx(Codicon, { name: c.platform === 'discord' ? 'comment-discussion' : 'broadcast', size: '0.75rem', className: 'shrink-0 text-(--ui-text-tertiary)' }),
               jsx('span', { className: 'shrink-0 text-foreground', children: c.label }),
               jsx('button', {
                 type: 'button',
-                title: 'Kopírovať ID kanála',
+                title: T('ui.copy_channel_id'),
                 onClick: () => void api?.copy(c.channel_id),
                 className: 'shrink-0 font-mono text-(--ui-text-tertiary) hover:text-sky-500',
                 children: `#${c.channel_id}`
@@ -1037,15 +1066,15 @@ function ExternalSection({ project }) {
           `${c.platform}:${c.channel_id}`
         )
       ),
-      !chans.length && project ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: 'Projekt nemá priradený kanál (channel_prompts v config.yaml).' }, 'none') : null,
+      !chans.length && project ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: T('ui.no_channel') }, 'none') : null,
       providers.length
         ? jsx(
             'div',
             {
               className: 'mt-1 text-[0.6875rem] text-(--ui-text-tertiary)',
               children: [
-                'LLM provideri tohto chatu:',
-                ...providers.map(p => jsx('div', { className: 'truncate pl-2 font-mono text-foreground', children: `${p.provider} / ${p.model} – ${p.calls}×${p.source === 'usage' ? ' (štatistika)' : ''}` }, `${p.provider}/${p.model}`))
+                T('ui.chat_providers'),
+                ...providers.map(p => jsx('div', { className: 'truncate pl-2 font-mono text-foreground', children: `${p.provider} / ${p.model} – ${p.calls}×${p.source === 'usage' ? ` (${T('ui.from_statistics')})` : ''}` }, `${p.provider}/${p.model}`))
               ]
             },
             'prov'
@@ -1056,16 +1085,16 @@ function ExternalSection({ project }) {
       className: 'inline-flex min-w-0 max-w-full items-center gap-1.5 text-[0.6875rem]',
       children: [
         jsx('span', { className: 'shrink-0 text-foreground', children: chatSource || '—' }),
-        chans.length ? jsx('span', { className: 'shrink-0 text-(--ui-text-tertiary)', children: `· ${plural(chans.length, ['kanál', 'kanály', 'kanálov'])} (${[...new Set(chans.map(c => c.label))].join(', ')})` }) : null,
+        chans.length ? jsx('span', { className: 'shrink-0 text-(--ui-text-tertiary)', children: `· ${T('ui.channels_count', chans.length)} (${[...new Set(chans.map(c => c.label))].join(', ')})` }) : null,
         providers.length
-          ? jsx('span', { className: 'min-w-0 truncate text-(--ui-text-tertiary)', children: `· ${plural([...new Set(providers.map(p => p.provider))].length, ['provider', 'provideri', 'providerov'])}` })
+          ? jsx('span', { className: 'min-w-0 truncate text-(--ui-text-tertiary)', children: `· ${T('ui.providers_count', [...new Set(providers.map(p => p.provider))].length)}` })
           : null
       ]
     })
   })
 }
 
-// ── Premenné Hermesa (HERMES_*, TERMINAL_*; no secrets) ─────────────────────
+// ── Hermes variables (HERMES_*, TERMINAL_*; no secrets) ─────────────────────
 
 function EnvSection({ cwd }) {
   const storedId = useValue(host.state.focusedStoredSessionId)
@@ -1098,33 +1127,33 @@ function EnvSection({ cwd }) {
   const heading = (text, key) => jsx('div', { className: 'mt-1.5 text-[0.6875rem] font-medium text-(--ui-text-tertiary)', children: text }, key)
   const more = []
   // what the next tool command of the focused chat receives
-  more.push(heading('Tento chat (dostane ich každý príkaz nástroja)', 'h-chat'))
-  more.push(row('HERMES_SESSION_ID', storedId || '—', null, 'ID session aktuálneho chatu'))
-  more.push(row('TERMINAL_CWD', cwd || '—', null, 'Pracovný adresár chatu'))
+  more.push(heading(`${T('env.this_chat')} (${T('env.this_chat_note')})`, 'h-chat'))
+  more.push(row('HERMES_SESSION_ID', storedId || '—', null, T('ui.env_session_doc')))
+  more.push(row('TERMINAL_CWD', cwd || '—', null, T('ui.env_cwd_doc')))
   let group = null
   for (const c of core) {
     if (c.group === 'session') continue // per command, shown above
     if (c.group !== group) {
       group = c.group
-      more.push(heading(group.charAt(0).toUpperCase() + group.slice(1), `h-${group}`))
+      more.push(heading(L('env.group', group), `h-${group}`))
     }
     more.push(
       c.set
-        ? row(c.name, c.value, 'nastavená', c.doc)
+        ? row(c.name, c.value, T('ui.env_set'), c.doc)
         : c.resolved
-          ? row(c.name, c.value, 'dopočítané', c.doc)
-          : row(c.name, `nenastavená → ${c.default || '—'}`, null, c.doc, 'text-(--ui-text-tertiary)')
+          ? row(c.name, c.value, T('env.resolved'), c.doc)
+          : row(c.name, T('env.unset_default', L('env.default', c.default_code || 'none')), null, c.doc, 'text-(--ui-text-tertiary)')
     )
   }
   if (other.length) {
-    more.push(heading(`Ďalšie nastavené (${other.length})`, 'h-other'))
+    more.push(heading(`${T('env.other_set')} (${other.length})`, 'h-other'))
     for (const o of other) more.push(row(o.name, o.value, null, o.doc))
   }
-  if (d?.hidden_secret_count) more.push(jsx('div', { className: 'mt-1 text-[0.625rem] text-(--ui-text-tertiary)', children: `Skryté tajomstvá: ${d.hidden_secret_count} (kľúče, tokeny, heslá sa nikdy nezobrazujú)` }, 'hidden'))
-  more.push(jsx('div', { className: 'mt-1 text-[0.625rem] text-(--ui-text-tertiary)', children: `Hodnoty procesu: ${d?.process || 'gateway'} · popisy z dokumentácie Hermesa (tooltip)` }, 'note'))
+  if (d?.hidden_secret_count) more.push(jsx('div', { className: 'mt-1 text-[0.625rem] text-(--ui-text-tertiary)', children: T('env.hidden_secrets', d.hidden_secret_count) }, 'hidden'))
+  more.push(jsx('div', { className: 'mt-1 text-[0.625rem] text-(--ui-text-tertiary)', children: T('ui.env_note', d?.process || 'gateway') }, 'note'))
   return jsx(Section, {
     children: jsx(Field, {
-      label: 'Premenné',
+      label: T('ui.variables'),
       more,
       children: jsx('span', {
         className: 'min-w-0 truncate text-[0.6875rem] text-foreground',
@@ -1132,7 +1161,7 @@ function EnvSection({ cwd }) {
           ? '…'
           : query.isError
             ? errText(query.error)
-            : [home ? tailPath(home.value || '', 28) : null, profile ? `profil ${profile.value || profile.default}` : null, `${setCount} nastavených`].filter(Boolean).join(' · ')
+            : [home ? tailPath(home.value || '', 28) : null, profile ? T('ui.profile_name', profile.value || profile.default_code) : null, T('ui.set_count', setCount)].filter(Boolean).join(' · ')
       })
     })
   })
@@ -1150,7 +1179,7 @@ function gb(n) {
 function ageDays(ts) {
   if (!ts) return '?'
   const d = (Date.now() / 1000 - ts) / 86400
-  return d < 1 ? 'dnes' : `${Math.round(d)} d`
+  return d < 1 ? T('time.today') : T('time.days_short', Math.round(d))
 }
 
 function DiskSection() {
@@ -1174,10 +1203,10 @@ function DiskSection() {
     : query.isError
       ? errText(query.error)
       : [
-          drive.free != null ? `voľné ${gb(drive.free)} (${pct} %)` : null,
+          drive.free != null ? T('ui.disk_free', gb(drive.free), pct) : null,
           d?.home_size ? `Hermes ${gb(d.home_size)}` : null,
-          d?.scratch_size ? `pracovné ${gb(d.scratch_size)}` : null,
-          d?.scanning && !d?.areas ? 'počítam…' : null
+          d?.scratch_size ? T('ui.disk_work', gb(d.scratch_size)) : null,
+          d?.scanning && !d?.areas ? T('ui.computing') : null
         ]
           .filter(Boolean)
           .join(' · ')
@@ -1185,14 +1214,14 @@ function DiskSection() {
     jsxs('div', {
       className: 'mb-1 flex items-center gap-1.5 text-[0.6875rem] text-(--ui-text-tertiary)',
       children: [
-        jsx('span', { children: d?.scanned_at ? `spočítané ${clock(d.scanned_at)}${d.duration ? ` (${d.duration} s)` : ''}` : 'ešte nespočítané' }),
-        d?.scanning ? jsx('span', { className: 'text-amber-500', children: '· prepočítava sa…' }) : null,
+        jsx('span', { children: d?.scanned_at ? T('disk.scanned_at', clock(d.scanned_at)) + (d.duration ? ` (${d.duration} s)` : '') : T('disk.not_scanned') }),
+        d?.scanning ? jsx('span', { className: 'text-amber-500', children: `· ${T('disk.rescanning')}…` }) : null,
         jsx('button', {
           type: 'button',
           disabled: d?.scanning,
           onClick: () => setRefresh(x => x + 1),
           className: 'ml-auto rounded border border-(--ui-border) px-1.5 py-0.5 text-foreground hover:bg-(--chrome-action-hover) disabled:opacity-40',
-          children: 'Prepočítať'
+          children: T('ui.rescan')
         })
       ]
     }, 'head'),
@@ -1201,18 +1230,18 @@ function DiskSection() {
         className: 'flex min-w-0 items-center gap-1.5 text-[0.6875rem]',
         children: [
           jsx('span', { className: 'w-16 shrink-0 text-right tabular-nums text-foreground', children: gb(a.size) }),
-          jsx('span', { className: 'min-w-0 flex-1', children: jsx(FolderLink, { path: a.path, max: 30, title: `${a.path}\n${a.files} súborov` }) })
+          jsx('span', { className: 'min-w-0 flex-1', children: jsx(FolderLink, { path: a.path, max: 30, title: `${a.path}\n${T('common.files_count', a.files)}` }) })
         ]
       }, a.path)
     ),
-    scratch.length ? jsx('div', { className: 'mt-1.5 text-[0.6875rem] font-medium text-(--ui-text-tertiary)', children: `Pracovné priečinky (cache\\scratch): ${scratch.length}` }, 'sh') : null,
+    scratch.length ? jsx('div', { className: 'mt-1.5 text-[0.6875rem] font-medium text-(--ui-text-tertiary)', children: T('ui.work_folders_count', scratch.length) }, 'sh') : null,
     ...scratch.slice(0, 40).map(s => {
       const who = s.sessions?.[0]
       const tip = [
         s.path,
-        `${s.files} súborov · posledná zmena ${s.newest ? new Date(s.newest * 1000).toLocaleString() : '?'}`,
-        s.project_cwd ? `projekt: ${s.project_cwd}` : 'pôvod: v ledgeri nie je',
-        ...(s.sessions || []).map(x => `session: ${x.title || x.id} (${x.writes} zápisov)`)
+        `${T('common.files_count', s.files)} · ${T('ui.last_change', s.newest ? new Date(s.newest * 1000).toLocaleString() : '?')}`,
+        s.project_cwd ? T('ui.project_folder', s.project_cwd) : T('ui.origin_unknown'),
+        ...(s.sessions || []).map(x => T('ui.session_writes', x.title || x.id, x.writes))
       ].join('\n')
       return jsxs('div', {
         className: 'flex min-w-0 items-center gap-1.5 text-[0.6875rem]',
@@ -1228,12 +1257,12 @@ function DiskSection() {
         ]
       }, s.path)
     }),
-    scratch.length > 40 ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `… a ďalších ${scratch.length - 40}` }, 'more') : null,
-    jsx('div', { className: 'mt-1 text-[0.625rem] text-(--ui-text-tertiary)', children: 'Len prehľad – plugin nič nemaže. Klik otvorí priečinok v Prieskumníkovi.' }, 'note')
+    scratch.length > 40 ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `… ${T('common.and_more', scratch.length - 40)}` }, 'more') : null,
+    jsx('div', { className: 'mt-1 text-[0.625rem] text-(--ui-text-tertiary)', children: T('ui.disk_note') }, 'note')
   ]
   return jsx(Section, {
     children: jsx(Field, {
-      label: 'Disk Hermesa',
+      label: T('disk.title'),
       more,
       children: jsxs('span', {
         className: 'inline-flex min-w-0 max-w-full items-center gap-1.5 text-[0.6875rem]',
@@ -1245,11 +1274,6 @@ function DiskSection() {
 
 // ── Honcho Memory ───────────────────────────────────────────────────────────
 
-const HONCHO_LABELS = {
-  baseUrl: 'Server', environment: 'Prostredie', workspace: 'Workspace', peerName: 'Používateľ (peer)', aiPeer: 'AI peer',
-  sessionStrategy: 'Stratégia sessions', recallMode: 'Recall mód', dialecticDynamic: 'Dyn. dialektika', writeFrequency: 'Zápis',
-  contextTokens: 'Kontext', dialecticReasoningLevel: 'Uvažovanie', enabled: 'Zapnuté'
-}
 
 function HonchoSection() {
   const [check, setCheck] = useState(false)
@@ -1277,16 +1301,16 @@ function HonchoSection() {
   else {
     tone = !cfg.active ? 'muted' : conn && !conn.ok ? 'bad' : problems.length ? 'warn' : 'good'
     value = cfg.active
-      ? [cfg.settings?.workspace, cfg.settings?.sessionStrategy, cfg.settings?.recallMode].filter(Boolean).join(' · ') || 'aktívna'
-      : `nainštalovaná, aktívny provider: ${cfg.provider || 'žiadny'}`
+      ? [cfg.settings?.workspace, cfg.settings?.sessionStrategy, cfg.settings?.recallMode].filter(Boolean).join(' · ') || T('honcho.active')
+      : T('honcho.installed_other', cfg.provider || T('common.none'))
   }
   const more = !d?.available
-    ? [jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: cfg.provider ? `Aktívny memory provider je ${cfg.provider}.` : 'Externá pamäť nie je zapnutá (memory.provider).' }, 'na')]
+    ? [jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: cfg.provider ? T('honcho.active_provider', cfg.provider) : T('honcho.no_provider') }, 'na')]
     : [
-        ...Object.entries(cfg.settings || {}).map(([k, v]) => line(HONCHO_LABELS[k] || k, v)),
-        line('API kľúč', cfg.has_api_key ? 'nastavený (skrytý)' : 'chýba'),
-        line('Plugin honcho', cfg.plugin_enabled ? 'zapnutý' : cfg.plugin_installed ? 'vypnutý' : 'nenainštalovaný'),
-        line('Desktop plugin', cfg.desktop_plugin_enabled ? 'zapnutý' : cfg.desktop_plugin_installed ? 'vypnutý' : 'nenainštalovaný'),
+        ...Object.entries(cfg.settings || {}).map(([k, v]) => line(L('honcho.field', k), v)),
+        line(T('honcho.api_key'), cfg.has_api_key ? T('honcho.api_key_set') : T('honcho.api_key_missing')),
+        line(T('honcho.plugin'), cfg.plugin_enabled ? T('state.enabled') : cfg.plugin_installed ? T('state.disabled') : T('state.not_installed')),
+        line(T('honcho.desktop_plugin'), cfg.desktop_plugin_enabled ? T('state.enabled') : cfg.desktop_plugin_installed ? T('state.disabled') : T('state.not_installed')),
         jsxs('div', {
           className: 'mt-1 flex items-center gap-1.5 text-[0.6875rem]',
           children: [
@@ -1294,25 +1318,25 @@ function HonchoSection() {
               type: 'button',
               onClick: () => (check ? void query.refetch() : setCheck(true)),
               className: 'rounded border border-(--ui-border) px-1.5 py-0.5 text-foreground hover:bg-(--chrome-action-hover)',
-              children: query.isFetching && check ? 'Overujem…' : 'Overiť spojenie'
+              children: query.isFetching && check ? T('ui.checking') : T('ui.check_connection')
             }),
             conn
               ? jsx('span', {
                   className: conn.ok ? 'text-emerald-500' : 'text-destructive',
-                  title: conn.ok ? 'Anonymná požiadavka bez kľúča: HTTP 401/403 znamená, že server beží a TLS je v poriadku.' : conn.error,
-                  children: conn.ok ? `server odpovedá (HTTP ${conn.status}, ${conn.ms} ms)` : `${conn.stage}: ${conn.error}`
+                  title: conn.ok ? T('ui.anonymous_check_tip') : conn.error,
+                  children: conn.ok ? T('honcho.reachable', conn.status, conn.ms) : `${L('honcho.stage', conn.stage)}: ${conn.error}`
                 })
               : null
           ]
         }, 'conn'),
-        jsx('div', { className: 'mt-1 text-[0.6875rem] text-(--ui-text-tertiary)', children: `Log 7 dní: ${Object.entries(logs.counts || {}).map(([k, v]) => `${k} ${v}`).join(', ') || 'žiadne záznamy'}` }, 'counts'),
+        jsx('div', { className: 'mt-1 text-[0.6875rem] text-(--ui-text-tertiary)', children: T('honcho.log_counts', Object.entries(logs.counts || {}).map(([k, v]) => `${k} ${v}`).join(', ') || T('common.none')) }, 'counts'),
         ...(logs.session_keys || []).slice(0, 8).map(s => jsx('div', { className: 'truncate pl-2 font-mono text-[0.6875rem] text-foreground', title: s.key, children: `${s.key} · ${clock(s.last_ts)}` }, s.key)),
         ...problems.slice(0, 10).map((e, i) => jsx('div', { className: 'truncate text-[0.6875rem] text-amber-500', title: e.message, children: `⚠ ${clock(e.ts)} ${e.level}: ${e.message}` }, `p${i}`)),
         ...(logs.recent || []).slice(0, 6).map((e, i) => jsx('div', { className: 'truncate text-[0.625rem] text-(--ui-text-tertiary)', title: e.message, children: `${clock(e.ts)} ${e.message}` }, `r${i}`))
       ]
   return jsx(Section, {
     children: jsx(Field, {
-      label: 'Honcho Memory',
+      label: T('honcho.section'),
       more,
       children: jsxs('span', {
         className: 'inline-flex min-w-0 max-w-full items-center gap-1.5 text-[0.6875rem]',
@@ -1322,7 +1346,7 @@ function HonchoSection() {
   })
 }
 
-// ── F4: LLM komunikácia (volania providerov) ────────────────────────────────
+// ── LLM communication (provider calls) ────────────────────────────────
 
 function tok(n) {
   n = n || 0
@@ -1345,7 +1369,7 @@ function LlmProvider({ p }) {
               jsx('span', { className: 'min-w-0 flex-1 truncate font-mono text-foreground', children: m.model }),
               jsx('span', {
                 className: 'shrink-0 tabular-nums text-(--ui-text-tertiary)',
-                children: `${m.calls}× · ${tok(m.input_tokens)}→${tok(m.output_tokens)}${m.avg_duration != null ? ` · ⌀${m.avg_duration}s` : ''}${m.errors ? ` · ${m.errors} chýb` : ''}`
+                children: `${m.calls}× · ${tok(m.input_tokens)}→${tok(m.output_tokens)}${m.avg_duration != null ? ` · ⌀${m.avg_duration}s` : ''}${m.errors ? ` · ❌ ${m.errors}` : ''}`
               })
             ]
           },
@@ -1353,7 +1377,7 @@ function LlmProvider({ p }) {
         )
       ),
       p.aux?.length
-        ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: `pomocné: ${p.aux.map(a => `${a.aux_task} ${a.calls}×`).join(', ')}` }, 'aux')
+        ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: T('llm.aux', p.aux.map(a => `${a.aux_task} ${a.calls}×`).join(', ')) }, 'aux')
         : null,
       ...(p.hosts || []).slice(0, 3).map(h => jsx('div', { className: 'truncate font-mono text-[0.6875rem] text-(--ui-text-tertiary)', title: h, children: h }, h))
     ],
@@ -1390,15 +1414,15 @@ function LlmSection() {
   const t = d?.total
   const errors = d?.errors || []
   return jsxs(Section, {
-    title: 'LLM komunikácia',
+    title: T('llm.title'),
     children: [
       jsxs('div', {
         className: 'mb-1 flex items-center gap-1 text-[0.6875rem]',
         children: [
           ...[
-            ['session', 'Tento chat'],
+            ['session', T('ui.this_chat')],
             ['24h', '24 h'],
-            ['7d', '7 dní']
+            ['7d', T('ui.days_n', 7)]
           ].map(([value, label]) =>
             jsx(
               'button',
@@ -1413,8 +1437,8 @@ function LlmSection() {
           ),
           d
             ? jsx(Tip, {
-                label: d.capture_content ? 'Ukladá sa aj obsah volaní (detail: hermes repo-status --llm-call ID)' : 'Ukladajú sa len metadáta; obsah zapnete v Settings → Plugins → repo-status',
-                children: jsx('span', { className: 'ml-auto text-(--ui-text-tertiary)', children: d.capture_content ? '● obsah' : '○ len metadáta' })
+                label: d.capture_content ? T('llm.content_on') : T('ui.content_off_tip'),
+                children: jsx('span', { className: 'ml-auto text-(--ui-text-tertiary)', children: d.capture_content ? `● ${T('ui.content')}` : `○ ${T('ui.metadata_only')}` })
               })
             : null
         ]
@@ -1424,20 +1448,20 @@ function LlmSection() {
         : query.isError
           ? jsx('div', { className: 'text-xs text-amber-500', children: errText(query.error) })
           : !t?.calls
-            ? jsx('div', { className: 'text-xs text-(--ui-text-tertiary)', children: d?.enabled === false ? 'Záznam je vypnutý (nastavenie llm_log).' : 'Žiadne zaznamenané volania. (Záznam beží od zapnutia F4.)' })
+            ? jsx('div', { className: 'text-xs text-(--ui-text-tertiary)', children: d?.enabled === false ? T('llm.disabled') : T('llm.empty') })
             : jsxs('div', {
                 children: [
                   jsx(Field, {
-                    label: 'Spolu',
+                    label: T('ui.total'),
                     children: jsx('span', {
                       className: 'text-[0.6875rem] tabular-nums',
-                      children: `${plural(t.calls, ['volanie', 'volania', 'volaní'])} · in ${tok(t.input_tokens)} · cache ${tok(t.cache_read_tokens)} · out ${tok(t.output_tokens)}${t.reasoning_tokens ? ` · reasoning ${tok(t.reasoning_tokens)}` : ''}`
+                      children: `${T('ui.calls_count', t.calls)} · in ${tok(t.input_tokens)} · cache ${tok(t.cache_read_tokens)} · out ${tok(t.output_tokens)}${t.reasoning_tokens ? ` · reasoning ${tok(t.reasoning_tokens)}` : ''}`
                     })
                   }),
                   ...(d.providers || []).map(p => jsx(LlmProvider, { p }, p.provider)),
                   errors.length
                     ? jsx(Field, {
-                        label: 'Chyby',
+                        label: T('ui.errors'),
                         more: errors.map(e =>
                           jsx(
                             'div',
@@ -1449,7 +1473,7 @@ function LlmSection() {
                             e.id
                           )
                         ),
-                        children: jsx('span', { className: 'text-[0.6875rem] text-amber-500', children: `${errors.length}${errors.length >= 15 ? '+' : ''} · posledná ${clock(errors[0].ts)}` })
+                        children: jsx('span', { className: 'text-[0.6875rem] text-amber-500', children: `${errors.length}${errors.length >= 15 ? '+' : ''} · ${T('ui.last_error', clock(errors[0].ts))}` })
                       })
                     : null
                 ]
@@ -1461,6 +1485,7 @@ function LlmSection() {
 // ── pane ────────────────────────────────────────────────────────────────────
 
 function RepoPane() {
+  usePluginI18n(PLUGIN_ID) // re-render the whole pane when the display language changes
   const r = useRepo()
   const { cwd, project, local, data, isRepo, remoteCheck, summary } = r
 
@@ -1474,32 +1499,32 @@ function RepoPane() {
           jsxs('div', {
             className: 'truncate text-xs',
             children: [
-              jsx('span', { className: 'text-(--ui-text-tertiary)', children: 'Project: ' }),
-              jsx('span', { className: 'font-medium text-foreground', children: project?.name || (r.resolving ? '…' : 'bez projektu') })
+              jsx('span', { className: 'text-(--ui-text-tertiary)', children: `${T('ui.project')}: ` }),
+              jsx('span', { className: 'font-medium text-foreground', children: project?.name || (r.resolving ? '…' : T('ui.no_project')) })
             ]
           }),
           jsx('div', {
             className: 'truncate text-[0.6875rem] text-(--ui-text-tertiary)',
             children: !cwd
               ? r.resolving
-                ? 'Hľadám priečinok…'
-                : 'Žiadny pracovný adresár'
+                ? T('ui.finding_folder')
+                : T('ui.no_working_folder')
               : !isRepo
                 ? local.isLoading
-                  ? 'Načítavam…'
-                  : 'Mimo git repa'
+                  ? T('ui.loading')
+                  : T('common.outside_git')
                 : summary.current
-                  ? 'Všetko commitnuté a aktuálne'
-                  : summary.reasons.map(x => REASONS[x] || x).join(' · ')
+                  ? T('verdict.all_current')
+                  : summary.reasons.map(x => L('reason', x)).join(' · ')
           })
         ]
       }),
       jsx(Tip, {
-        label: 'Obnoviť a overiť server',
+        label: T('ui.refresh_check'),
         children: jsx(Button, {
           variant: 'ghost',
           size: 'icon-xs',
-          'aria-label': 'Obnoviť',
+          'aria-label': T('ui.refresh'),
           disabled: local.isFetching,
           onClick: () => void refreshAll(cwd, true),
           children: jsx(Codicon, { name: 'refresh', size: '0.875rem', className: local.isFetching ? 'animate-spin' : '' })
@@ -1514,14 +1539,14 @@ function RepoPane() {
   } else if (cwd && local.isError) {
     body = jsx('div', {
       className: 'px-3 py-3 text-xs text-destructive',
-      children: `Backend nedostupný: ${local.error?.message || local.error}. Je plugin zapnutý v config.yaml (plugins.enabled)?`
+      children: T('ui.backend_unavailable', errText(local.error))
     })
   } else if (isRepo) {
     body = jsxs(Section, {
       children: [jsx(RemoteSection, { data }), jsx(GitSection, { data, remoteCheck }), jsx(UncommittedSection, { data }), jsx(WorkFilesSection, { data })]
     })
   } else if (!cwd && !project) {
-    body = jsx('div', { className: 'px-3 py-3 text-xs text-(--ui-text-tertiary)', children: 'Otvorte chat s pracovným adresárom alebo projektom.' })
+    body = jsx('div', { className: 'px-3 py-3 text-xs text-(--ui-text-tertiary)', children: T('ui.open_chat_hint') })
   }
 
   return jsxs('div', {
@@ -1547,6 +1572,7 @@ function RepoPane() {
 }
 
 function RepoChip() {
+  usePluginI18n(PLUGIN_ID)
   const { isRepo, data, summary, remoteCheck } = useRepo()
   const settings = useQuery({ queryKey: [PLUGIN_ID, 'settings'], queryFn: () => api.rest('/settings'), enabled: Boolean(api), staleTime: 60_000 })
   if (!isRepo || settings.data?.show_chip === false) return null
@@ -1557,7 +1583,7 @@ function RepoChip() {
   const label = [br.detached ? 'detached' : br.head, ch.total ? `±${ch.total}` : null, ahead ? `↑${ahead}` : null, behind ? `↓${behind}` : null]
     .filter(Boolean)
     .join(' ')
-  const tip = summary.current ? 'Repo: všetko commitnuté a aktuálne' : `Repo: ${summary.reasons.map(r => REASONS[r] || r).join(', ')} – klik otvorí diff`
+  const tip = summary.current ? `Repo: ${T('verdict.all_current')}` : `Repo: ${summary.reasons.map(r => L('reason', r)).join(', ')} – ${T('ui.click_opens_diff')}`
   return jsx(Tip, {
     label: tip,
     children: jsxs('button', {
@@ -1574,9 +1600,22 @@ function RepoChip() {
 export default {
   id: PLUGIN_ID,
   name: 'Repo Status',
-  description: 'Projekt, priečinky, externé repo, git stav, necommitnuté súbory a kam zapisoval Hermes – pre aktuálny chat.',
+  description: 'Project, folders, external repo, git state, uncommitted files, where Hermes wrote, settings, LLM calls, Honcho, disk and variables - for the focused chat.',
   register(ctx) {
+    // Strings: English inline (EN), other Hermes languages from the backend catalog.
+    ctx.i18n?.register?.({ en: toMessages(EN) })
+    ctx
+      .rest('/i18n', { timeoutMs: 15_000 })
+      .then(catalogs => {
+        const bundles = {}
+        for (const [lang, flat] of Object.entries(catalogs?.catalogs || {})) {
+          if (lang !== 'en') bundles[lang] = toMessages(flat)
+        }
+        if (Object.keys(bundles).length) ctx.i18n?.register?.(bundles)
+      })
+      .catch(() => {}) // older backend without /i18n: the panel stays English
     api = {
+      t: ctx.i18n?.t ? (key, ...args) => ctx.i18n.t(key, ...args) : null,
       rest: (path, opts) => ctx.rest(path, opts),
       openExternal: url => ctx.os.openExternal(url),
       revealPath: path => ctx.os.revealPath(path),
@@ -1609,7 +1648,7 @@ export default {
         area: PALETTE_AREA,
         data: {
           id: 'repo-status.refresh',
-          label: 'Repo Status: obnoviť a overiť server',
+          label: 'Repo Status: refresh and check server',
           keywords: ['git', 'repo', 'status', 'branch', 'vetva', 'projekt'],
           run: () => void refreshAll(host.state.cwd.get() || lastCwd, true)
         }
@@ -1617,3 +1656,333 @@ export default {
     ])
   }
 }
+
+// @@EN-BEGIN (generated by scripts/sync_locales.py from locales/en.json - do not edit)
+const EN = {
+  "time.never": "never",
+  "time.seconds_ago": "{0} s ago",
+  "time.minutes_ago": "{0} min ago",
+  "time.hours_ago": "{0} h ago",
+  "time.days_ago": "{0} days ago",
+  "time.today": "today",
+  "time.days_short": "{0} d",
+  "common.none": "none",
+  "common.and_more": "and {0} more",
+  "common.files_count": "files: {0}",
+  "common.outside_git": "Outside any git repository",
+  "common.outside_git_short": "Outside git",
+  "state.enabled": "enabled",
+  "state.disabled": "disabled",
+  "state.not_installed": "not installed",
+  "scope.this_session": "this session",
+  "scope.last_24h_unknown_session": "last 24 h (session unknown)",
+  "scope.all_sessions_window": "all sessions, last {0}",
+  "scope.last_window": "last {0}",
+  "error.not_a_repo": "not inside a git repository",
+  "error.bare_repo": "a bare repository has no working tree",
+  "error.git_error": "git error",
+  "error.internal_error": "internal error",
+  "verdict.all_current": "everything committed and up to date",
+  "verdict.committed_unverified": "everything committed (server not checked)",
+  "reason.uncommitted": "uncommitted changes",
+  "reason.unpushed": "unpushed commits",
+  "reason.server_newer": "the server has newer changes",
+  "reason.not_on_remote": "branch not on the server",
+  "reason.no_upstream": "no upstream",
+  "reason.remote_unreachable": "server not checked",
+  "reason.conflicts": "conflicts",
+  "remote.up_to_date": "✅ up to date – the server has the same commit",
+  "remote.local_ahead": "⬆️ local commits are not on the server (push needed)",
+  "remote.behind": "⬇️ the server has newer commits",
+  "remote.diverged": "⚠️ the branch diverged from the server",
+  "remote.remote_newer": "⬇️ the server has a newer commit (count unknown without fetch)",
+  "remote.not_on_remote": "⚠️ the branch does not exist on the server",
+  "remote.no_upstream": "⚠️ the branch has no upstream",
+  "remote.detached": "⚠️ detached HEAD",
+  "remote.no_remote": "— the repository has no remote",
+  "remote.skipped": "— server check switched off",
+  "remote.error": "❌ the server could not be checked",
+  "remote_short.up_to_date": "up to date",
+  "remote_short.local_ahead": "push needed",
+  "remote_short.behind": "server is newer",
+  "remote_short.diverged": "diverged from server",
+  "remote_short.remote_newer": "server is newer",
+  "remote_short.not_on_remote": "branch not on server",
+  "remote_short.no_upstream": "no upstream",
+  "remote_short.detached": "detached HEAD",
+  "remote_short.no_remote": "no remote",
+  "remote_short.skipped": "not checked",
+  "remote_short.not_a_repo": "—",
+  "remote_short.error": "server not checked",
+  "kind.github": "GitHub",
+  "kind.gitlab": "GitLab",
+  "kind.forgejo": "Forgejo/Gitea",
+  "kind.bitbucket": "Bitbucket",
+  "kind.azure": "Azure DevOps",
+  "kind.local": "local folder",
+  "kind.other": "other",
+  "gitscope.local": "local (this repository only)",
+  "gitscope.global": "global",
+  "gitscope.system": "system",
+  "gitscope.worktree": "worktree",
+  "gitscope.command": "command line",
+  "changes.staged": "staged",
+  "changes.unstaged": "modified",
+  "changes.untracked": "new",
+  "changes.conflicted": "conflicts",
+  "repo.local": "Local repository",
+  "repo.external": "External repository",
+  "repo.no_remote": "none (local only)",
+  "repo.user_not_set": "not set (user.name / user.email)",
+  "repo.branch": "Branch",
+  "repo.detached_at": "detached HEAD at `{0}`",
+  "repo.no_upstream": "no upstream",
+  "repo.last_commit": "Last commit",
+  "repo.no_commit": "no commit yet",
+  "repo.checked": "checked {0}",
+  "repo.last_fetch": "Last fetch",
+  "repo.uncommitted": "Uncommitted files",
+  "repo.binary": "binary",
+  "repo.work_files": "Hermes work files",
+  "repo.work_files_note": "not part of the verdict, not code changes",
+  "repo.diffstat": "files: {0}, lines +{1} −{2} (new files are not in the diff)",
+  "action.write": "write",
+  "action.patch": "edit",
+  "action.create": "new",
+  "action.delete": "deleted",
+  "action.command": "command",
+  "action.code": "code",
+  "touched.title": "Where Hermes wrote",
+  "touched.empty": "The ledger has no writes yet. (It records from the moment the plugin is enabled.)",
+  "touched.outside_count": "places outside the session's working folder: {0}",
+  "touched.outside_flag": "outside cwd",
+  "touched.uncommitted_now": "uncommitted now: {0}",
+  "touched.still_uncommitted": "uncommitted",
+  "touched.committed_or_reverted": "committed or reverted",
+  "touched.path_guessed": "path guessed",
+  "touched.probable_note": "probable – files unknown",
+  "touched.legend": "✍️ documented writes (file tools) · ⌨️ commands – changed files cannot be determined",
+  "env.title": "Hermes variables",
+  "env.process": "process: {0}",
+  "env.process_cli": "terminal (hermes CLI)",
+  "env.this_chat": "This chat",
+  "env.this_chat_note": "every tool command receives these",
+  "env.resolved": "resolved",
+  "env.unset_default": "not set → {0}",
+  "env.other_set": "Other variables set",
+  "env.hidden_secrets": "Hidden secrets: {0} (keys, tokens and passwords are never shown)",
+  "env.group.base": "Base",
+  "env.group.session": "Session",
+  "env.group.kanban": "Kanban",
+  "env.group.behavior": "Behavior",
+  "env.default.terminal_cwd": "terminal.cwd in config.yaml / launch folder",
+  "env.default.per_command": "set for every tool command",
+  "env.default.worker_only": "only in a worker process",
+  "env.default.off": "off",
+  "env.default.from_config": "from config.yaml",
+  "env.default.none": "—",
+  "disk.title": "Hermes disk",
+  "disk.free": "Free space: {0} of {1} ({2} %)",
+  "disk.scanning_now": "Folder sizes are being computed in the background – try `/repo disk` again in a minute.",
+  "disk.not_scanned": "not computed yet",
+  "disk.summary": "Hermes: {0} · work folders (cache\\scratch): {1} in {2} folders",
+  "disk.scanned_at": "computed {0}",
+  "disk.rescanning": "recomputing",
+  "disk.areas": "Areas",
+  "disk.largest_work": "Largest work folders",
+  "disk.readonly_note": "Overview only – the plugin deletes nothing. Open a folder in Explorer from the Desktop panel.",
+  "honcho.title": "Honcho memory",
+  "honcho.section": "Honcho Memory",
+  "honcho.active": "active",
+  "honcho.active_provider": "active memory provider: {0}",
+  "honcho.no_provider": "no external memory provider",
+  "honcho.installed_other": "installed, but the active provider is {0}",
+  "honcho.api_key": "API key",
+  "honcho.api_key_set": "set (hidden)",
+  "honcho.api_key_missing": "missing",
+  "honcho.aliases": "user aliases: {0}",
+  "honcho.plugin": "Plugin honcho",
+  "honcho.desktop_plugin": "Desktop plugin",
+  "honcho.connection": "Connection",
+  "honcho.reachable": "server answers (HTTP {0}, {1} ms)",
+  "honcho.log_counts": "Log (7 days): {0}",
+  "honcho.session_keys": "Honcho sessions in the log: {0}",
+  "honcho.field.baseUrl": "Server",
+  "honcho.field.environment": "Environment",
+  "honcho.field.workspace": "Workspace",
+  "honcho.field.peerName": "User (peer)",
+  "honcho.field.aiPeer": "AI peer",
+  "honcho.field.sessionStrategy": "Session strategy",
+  "honcho.field.recallMode": "Recall mode",
+  "honcho.field.dialecticDynamic": "Dynamic dialectic",
+  "honcho.field.writeFrequency": "Write frequency",
+  "honcho.field.contextTokens": "Context (tokens)",
+  "honcho.field.dialecticReasoningLevel": "Reasoning level",
+  "honcho.field.enabled": "Enabled",
+  "honcho.stage.config": "configuration",
+  "honcho.stage.dns": "DNS",
+  "honcho.stage.tcp": "connection",
+  "honcho.stage.tls": "TLS",
+  "honcho.stage.timeout": "timeout",
+  "honcho.stage.network": "network",
+  "honcho.stage.error": "error",
+  "llm.title": "LLM communication",
+  "llm.disabled": "Recording is off (setting llm_log).",
+  "llm.empty": "No calls recorded. (Recording runs from the moment it was enabled.)",
+  "llm.total": "Calls: {0} · input {1} · cache {2} · output {3} · errors {4}",
+  "llm.provider_line": "calls: {0}, input {1}, output {2}",
+  "llm.aux": "auxiliary: {0}",
+  "llm.recent_errors": "Recent errors",
+  "llm.content_on": "Call content: stored (details: hermes repo-status --llm-call ID)",
+  "llm.content_off": "Call content: not stored – metadata only (setting llm_capture_content)",
+  "settings.title": "Hermes settings changes",
+  "settings.section": "Hermes settings",
+  "settings.empty": "No changes to skills, memory, cron, config, SOUL or plugins.",
+  "settings.baseline_note": "(the first file scan just saved a baseline; further changes show from now on)",
+  "settings.unknown_origin": "unknown origin",
+  "settings.hermes_file": "Hermes (file)",
+  "settings.skills_catalog": "(skills catalog)",
+  "settings.legend": "Hermes = proven by a tool call · unknown origin = file changed without a tool call (a person or another program)",
+  "category.skill": "Skills",
+  "category.memory": "Memory",
+  "category.cron": "Scheduled jobs",
+  "category.config": "Configuration",
+  "category.agent": "Agent (SOUL)",
+  "category.plugin": "Plugins",
+  "category.hook": "Hooks",
+  "settings_action.create": "new",
+  "settings_action.modify": "changed",
+  "settings_action.delete": "deleted",
+  "settings_action.patch": "edit",
+  "settings_action.edit": "edit",
+  "settings_action.write_file": "write",
+  "settings_action.write": "write",
+  "settings_action.add": "added",
+  "settings_action.remove": "removed",
+  "settings_action.replace": "replaced",
+  "settings_action.update": "updated",
+  "settings_action.pause": "paused",
+  "settings_action.resume": "resumed",
+  "settings_action.run": "run",
+  "import.title": "History import into the ledger",
+  "import.dry_run": "dry run, nothing written",
+  "import.since": "Since: {0}",
+  "import.profile": "Profile {0} – {1}",
+  "import.untested_schema": "state.db schema version {0} was not tested with the plugin (tested: {1})",
+  "import.counts": "tool calls: {0}, already in the ledger or duplicated in history: {1}, failed/without result: {2}",
+  "import.new_rows": "new rows: {0}",
+  "import.total": "Total new rows: {0}",
+  "help.title": "git status of the session's working folder",
+  "help.repo": "overview (repository, remote, git user, branch, server, uncommitted files, diff stat)",
+  "help.path": "another folder",
+  "help.check": "check the server again (no cache)",
+  "help.local": "without checking the server",
+  "help.touched": "where Hermes wrote: this session · all sessions 24 h · 7 days",
+  "help.settings": "changes to skills, memory, cron, config, SOUL, plugins (default 7 d)",
+  "help.llm": "LLM provider calls: models, tokens, timing, errors (default 24 h)",
+  "help.honcho": "Honcho memory: active?, settings, connection, log events",
+  "help.env": "Hermes variables (HERMES_*, TERMINAL_*) with descriptions, no secrets",
+  "help.disk": "disk usage: Hermes and its work folders (cache\\scratch), overview only",
+  "help.full_diff": "Full diff: `hermes repo-status --diff` in a terminal or the Review pane in Desktop.",
+  "cli.disk_scanning": "Computing Hermes folder sizes (may take tens of seconds)…",
+  "cli.llm_call_missing": "Call {0} does not exist.",
+  "cli.llm_content_missing": "Content is not stored (setting llm_capture_content is off) or has expired.",
+  "cli.not_stored": "(not stored)",
+  "cli.no_diff": "(no changes against HEAD)",
+  "cli.diff_truncated": "… diff truncated (256 KB limit)",
+  "cli.excluded_patterns": "Excluded patterns: {0}",
+  "source.cli": "Terminal",
+  "source.tui": "Terminal",
+  "source.cron": "Cron",
+  "source.api": "API",
+  "source.subagent": "Subagent",
+  "source.delegate": "Subagent",
+  "ui.server_check_failed": "Repo Status: the server could not be checked",
+  "ui.backend_outdated": "The plugin backend is older than the panel – restart the Hermes gateway.",
+  "ui.backend_unavailable": "Backend unavailable: {0}. Is the plugin enabled in config.yaml (plugins.enabled)?",
+  "ui.collapse": "Collapse",
+  "ui.expand": "Expand",
+  "ui.open_in_explorer": "Open in Explorer: {0}",
+  "ui.click_open_explorer": "Click: open in Explorer",
+  "ui.primary_folder": "Primary folder",
+  "ui.folder": "Folder",
+  "ui.stored_folder": "stored folder",
+  "ui.chat_git_repo": "Chat git repo",
+  "ui.external_repo": "External repo",
+  "ui.git_user": "Git user",
+  "ui.not_set": "not set",
+  "ui.checking": "checking…",
+  "ui.checked_and_fetch": "checked {0} · last fetch {1}",
+  "ui.work_files": "Hermes work",
+  "ui.work_files_note": "Plans, sketches and notes Hermes keeps inside the repository. They are not code changes and do not count against \"everything committed\".",
+  "ui.no_code_changes": "no code changes",
+  "ui.tree_clean": "none – the working tree is clean",
+  "ui.uncommitted": "Uncommitted",
+  "ui.diff_in_review": "Diff in the Review pane",
+  "ui.open_diff": "Open diff",
+  "ui.lines_changed": "+{0} −{1} lines",
+  "ui.outside_chat_folder": "Outside the chat's working folder",
+  "ui.this_chat": "This chat",
+  "ui.all_24h": "All 24 h",
+  "ui.outside_cwd_count": "{0} outside cwd",
+  "ui.touched_empty_chat": "Hermes has not written anything in this chat yet.",
+  "ui.touched_empty_24h": "No writes in the last 24 h.",
+  "ui.days_n": "{0} days",
+  "ui.some_unattributed": "Some changes have no proven Hermes tool call",
+  "ui.empty_folder": "empty folder",
+  "ui.files": "Files",
+  "ui.items_count": "items: {0}",
+  "ui.capacity_unknown": "Capacity is recorded from LLM calls made after the plugin was enabled",
+  "ui.capacity_tip": "Context: {0} / {1} tokens (latest call, {2})",
+  "ui.click_switch_session": "Click: switch to this session",
+  "ui.branch_lane": "branch {0}",
+  "ui.scope_project": "Project",
+  "ui.scope_all": "All",
+  "ui.sessions": "Sessions",
+  "ui.external_comm": "External comm.",
+  "ui.chat_source": "This chat: {0}",
+  "ui.unknown_source": "unknown source",
+  "ui.originally": "originally {0}",
+  "ui.copy_channel_id": "Copy channel ID",
+  "ui.no_channel": "The project has no channel assigned (channel_prompts in config.yaml).",
+  "ui.chat_providers": "LLM providers of this chat:",
+  "ui.from_statistics": "statistics",
+  "ui.channels_count": "channels: {0}",
+  "ui.providers_count": "providers: {0}",
+  "ui.env_session_doc": "Session ID of the current chat",
+  "ui.env_cwd_doc": "Working folder of the chat",
+  "ui.env_set": "set",
+  "ui.env_note": "Values of the {0} process · descriptions from the Hermes documentation (tooltip)",
+  "ui.variables": "Variables",
+  "ui.profile_name": "profile {0}",
+  "ui.set_count": "set: {0}",
+  "ui.disk_free": "free {0} ({1} %)",
+  "ui.disk_work": "work {0}",
+  "ui.computing": "computing…",
+  "ui.rescan": "Recompute",
+  "ui.work_folders_count": "Work folders (cache\\scratch): {0}",
+  "ui.last_change": "last change {0}",
+  "ui.project_folder": "project: {0}",
+  "ui.origin_unknown": "origin: not in the ledger",
+  "ui.session_writes": "session: {0} (writes: {1})",
+  "ui.disk_note": "Overview only – the plugin deletes nothing. Click opens the folder in Explorer.",
+  "ui.check_connection": "Check connection",
+  "ui.anonymous_check_tip": "Anonymous request without a key: HTTP 401/403 means the server runs and TLS is fine.",
+  "ui.content_off_tip": "Metadata only; enable content in Settings → Plugins → repo-status",
+  "ui.content": "content",
+  "ui.metadata_only": "metadata only",
+  "ui.total": "Total",
+  "ui.calls_count": "calls: {0}",
+  "ui.errors": "Errors",
+  "ui.last_error": "latest {0}",
+  "ui.project": "Project",
+  "ui.no_project": "no project",
+  "ui.finding_folder": "Finding the folder…",
+  "ui.no_working_folder": "No working folder",
+  "ui.loading": "Loading…",
+  "ui.refresh_check": "Refresh and check the server",
+  "ui.refresh": "Refresh",
+  "ui.open_chat_hint": "Open a chat with a working folder or a project.",
+  "ui.click_opens_diff": "click opens the diff"
+}
+// @@EN-END

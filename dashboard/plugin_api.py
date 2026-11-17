@@ -39,6 +39,13 @@ llm_log = _load_sibling("llm_log")
 workspace = _load_sibling("workspace")
 honcho_status = _load_sibling("honcho_status")
 disk_usage = _load_sibling("disk_usage")
+plugin_i18n = _load_sibling("i18n")
+
+
+@router.get("/i18n")
+async def i18n_catalogs() -> dict[str, Any]:
+    """Every language catalog (flat keys, positional {0} placeholders) for the Desktop panel."""
+    return {"languages": list(plugin_i18n.LANGUAGES), "catalogs": plugin_i18n.all_catalogs()}
 env_vars = _load_sibling("env_vars")
 
 
@@ -93,7 +100,7 @@ async def honcho(check: bool = False, days: float = 7) -> dict[str, Any]:
 
 @router.get("/ls")
 async def ls(path: str) -> dict[str, Any]:
-    """F5: one folder level (folders first) for the Súbory section."""
+    """F5: one folder level (folders first) for the Files section."""
     return await run_in_threadpool(workspace.list_dir, path)
 
 

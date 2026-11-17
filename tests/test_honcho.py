@@ -121,10 +121,6 @@ class EndpointNormalizationTests(unittest.TestCase):
         ]
         self.assertEqual(llm_log.summarize_calls(calls)["providers"][0]["hosts"], ["https://h/x"])
 
-    def test_plural(self):
-        self.assertEqual(render._plural(1, "volanie", "volania", "volaní"), "volanie")
-        self.assertEqual(render._plural(3, "volanie", "volania", "volaní"), "volania")
-        self.assertEqual(render._plural(12, "volanie", "volania", "volaní"), "volaní")
 
 
 if __name__ == "__main__":

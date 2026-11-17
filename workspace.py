@@ -28,9 +28,9 @@ PLATFORM_LABELS = {
 def list_dir(path: str | os.PathLike[str], *, limit: int = MAX_ENTRIES) -> dict[str, Any]:
     p = Path(path)
     if not p.is_absolute():
-        return {"ok": False, "error": "cesta musí byť absolútna"}
+        return {"ok": False, "error": "path must be absolute"}
     if not p.is_dir():
-        return {"ok": False, "error": "priečinok neexistuje"}
+        return {"ok": False, "error": "folder does not exist"}
     entries = []
     try:
         with os.scandir(p) as it:

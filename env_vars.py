@@ -18,26 +18,26 @@ PREFIXES = ("HERMES_", "TERMINAL_")
 SECRET_NAME = re.compile(r"(?i)(KEY|TOKEN|SECRET|PASSW|AUTH|CREDENTIAL|COOKIE|CLIENT_ID|SESSION_TOKEN|PRIVATE)")
 SECRET_VALUE = re.compile(r"(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{20,}\.)")
 
-# (name, group, default shown when unset)
+# (name, group code, default code shown when unset — translated via env.group.* / env.default.*)
 CORE: list[tuple[str, str, str | None]] = [
-    ("HERMES_HOME", "základ", None),
-    ("HERMES_PROFILE", "základ", "default"),
-    ("TERMINAL_CWD", "základ", "terminal.cwd v config.yaml / adresár spustenia"),
-    ("TERMINAL_ENV", "základ", "local"),
-    ("HERMES_SESSION_ID", "session", "nastavuje sa pre každý príkaz nástroja"),
-    ("HERMES_SESSION_PLATFORM", "session", "nastavuje sa pre každý príkaz nástroja"),
-    ("HERMES_SESSION_KEY", "session", "nastavuje sa pre každý príkaz nástroja"),
-    ("HERMES_SESSION_SOURCE", "session", "nastavuje sa pre každý príkaz nástroja"),
-    ("HERMES_KANBAN_TASK", "kanban", "len vo worker procese"),
-    ("HERMES_KANBAN_BOARD", "kanban", "len vo worker procese"),
-    ("HERMES_MAX_ITERATIONS", "správanie", "500"),
-    ("HERMES_REDACT_SECRETS", "správanie", "true"),
-    ("HERMES_YOLO_MODE", "správanie", "vypnuté"),
-    ("HERMES_SAFE_MODE", "správanie", "vypnuté"),
-    ("HERMES_ACCEPT_HOOKS", "správanie", "vypnuté"),
-    ("HERMES_INFERENCE_PROVIDER", "správanie", "podľa config.yaml"),
-    ("HERMES_ENABLE_PROJECT_PLUGINS", "správanie", "vypnuté"),
-    ("HERMES_PLUGIN_PAYLOAD_MAX_CHARS", "správanie", "50000"),
+    ("HERMES_HOME", "base", None),
+    ("HERMES_PROFILE", "base", "default"),
+    ("TERMINAL_CWD", "base", "terminal_cwd"),
+    ("TERMINAL_ENV", "base", "local"),
+    ("HERMES_SESSION_ID", "session", "per_command"),
+    ("HERMES_SESSION_PLATFORM", "session", "per_command"),
+    ("HERMES_SESSION_KEY", "session", "per_command"),
+    ("HERMES_SESSION_SOURCE", "session", "per_command"),
+    ("HERMES_KANBAN_TASK", "kanban", "worker_only"),
+    ("HERMES_KANBAN_BOARD", "kanban", "worker_only"),
+    ("HERMES_MAX_ITERATIONS", "behavior", "500"),
+    ("HERMES_REDACT_SECRETS", "behavior", "true"),
+    ("HERMES_YOLO_MODE", "behavior", "off"),
+    ("HERMES_SAFE_MODE", "behavior", "off"),
+    ("HERMES_ACCEPT_HOOKS", "behavior", "off"),
+    ("HERMES_INFERENCE_PROVIDER", "behavior", "from_config"),
+    ("HERMES_ENABLE_PROJECT_PLUGINS", "behavior", "off"),
+    ("HERMES_PLUGIN_PAYLOAD_MAX_CHARS", "behavior", "50000"),
 ]
 _DOC_ROW = re.compile(r"^\|\s*`([A-Z][A-Z0-9_]+)`\s*\|\s*(.+?)\s*\|\s*$")
 
@@ -64,7 +64,7 @@ def is_secret_name(name: str) -> bool:
 
 def _safe_value(value: str) -> str:
     if SECRET_VALUE.search(value):
-        return "*** (vyzerá ako prihlasovací údaj)"
+        return "*** (looks like a credential)"
     return value if len(value) <= 400 else value[:400] + "…"
 
 
@@ -83,7 +83,7 @@ def snapshot(environ: Mapping[str, str], hermes_home: Path, *, docs: dict[str, s
         elif name in resolved:
             item["value"], item["resolved"] = resolved[name], True
         else:
-            item["default"] = default
+            item["default_code"] = default
         core.append(item)
     other = []
     hidden = 0

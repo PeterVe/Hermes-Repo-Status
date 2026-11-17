@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from . import disk_usage, env_vars, gitprobe, history_import, honcho_status, ledger, llm_log, render, settings_watch
+from .i18n import tr
 
 
 def _env_view(process: str) -> dict[str, Any]:
@@ -226,17 +227,17 @@ def _parse_scope(text: str, session_id: str | None) -> tuple[str | None, float |
     now = time.time()
     if not word or word in ("session", "this"):
         if session_id:
-            return session_id, None, "táto session"
-        return None, now - 86400, "posledných 24 h (session neznáma)"
+            return session_id, None, tr("scope.this_session")
+        return None, now - 86400, tr("scope.last_24h_unknown_session")
     if word in ("all", "vsetko", "všetko"):
-        return None, now - 86400, "všetky sessions, posledných 24 h"
+        return None, now - 86400, tr("scope.all_sessions_window", "24 h")
     unit = word[-1:]
     try:
         n = float(word[:-1])
     except ValueError:
-        return None, now - 86400, "všetky sessions, posledných 24 h"
+        return None, now - 86400, tr("scope.all_sessions_window", "24 h")
     hours = n * 24 if unit == "d" else n
-    return None, now - hours * 3600, f"všetky sessions, posledných {word}"
+    return None, now - hours * 3600, tr("scope.all_sessions_window", word)
 
 
 def _touched(ctx: Any, *, session_id: str | None, since: float | None, cwd: str | None, with_status: bool = True) -> dict[str, Any]:
@@ -365,20 +366,25 @@ TOUCHED_SCHEMA = {
 
 # ── slash command ────────────────────────────────────────────────────────────
 
-SLASH_HELP = (
-    "**/repo** – stav git repa v pracovnom adresári session\n"
-    "`/repo` – prehľad (repo, remote, git user, vetva, server, necommitnuté súbory, diff stat)\n"
-    "`/repo <cesta>` – iný adresár\n"
-    "`/repo check [cesta]` – znova overiť server (bez cache)\n"
-    "`/repo local [cesta]` – bez overenia servera\n"
-    "`/repo touched` – kam zapisoval Hermes v tejto session · `/repo touched all` (24 h) · `/repo touched 7d`\n"
-    "`/repo settings [24h|7d|30d]` – zmeny skills, pamäte, cron, config, SOUL, pluginov (predvolene 7 d)\n"
-    "`/repo llm [session|24h|7d]` – volania LLM providerov: modely, tokeny, časy, chyby (predvolene 24 h)\n"
-    "`/repo honcho` – Honcho pamäť: aktívna?, nastavenia, spojenie, udalosti z logu\n"
-    "`/repo env` – premenné Hermesa (HERMES_*, TERMINAL_*) s popisom, bez tajomstiev\n"
-    "`/repo disk [refresh]` – miesto na disku: Hermes a jeho pracovné priečinky (cache\\scratch), len prehľad\n"
-    "Plný diff: `hermes repo-status --diff` v termináli alebo Review panel v Desktope."
+SLASH_HELP_KEYS = (
+    ("**/repo**", "help.title"),
+    ("`/repo`", "help.repo"),
+    ("`/repo <path>`", "help.path"),
+    ("`/repo check [path]`", "help.check"),
+    ("`/repo local [path]`", "help.local"),
+    ("`/repo touched` · `touched all` · `touched 7d`", "help.touched"),
+    ("`/repo settings [24h|7d|30d]`", "help.settings"),
+    ("`/repo llm [session|24h|7d]`", "help.llm"),
+    ("`/repo honcho`", "help.honcho"),
+    ("`/repo env`", "help.env"),
+    ("`/repo disk [refresh]`", "help.disk"),
 )
+
+
+def slash_help() -> str:
+    lines = [f"{cmd} – {tr(key)}" for cmd, key in SLASH_HELP_KEYS]
+    lines.append(tr("help.full_diff"))
+    return "\n".join(lines)
 
 
 def _make_slash_handler(ctx: Any):
@@ -389,7 +395,7 @@ def _make_slash_handler(ctx: Any):
             fresh = False
             check_remote = None
             if word in ("help", "pomoc", "?"):
-                return SLASH_HELP
+                return slash_help()
             if word in ("env", "premenne", "premenné", "vars"):
                 data = _env_view("gateway")
                 # what the next tool command of THIS chat would receive
@@ -408,18 +414,18 @@ def _make_slash_handler(ctx: Any):
                 sid = kwargs.get("session_id") or None
                 if arg in ("session", "chat", "this") and sid:
                     data = _llm_view(ctx, since=None, session_id=sid)
-                    return render.render_llm(data, label="táto session")
-                hours, label = _hours_arg(arg, 24)
+                    return render.render_llm(data, label_text=tr("scope.this_session"))
+                hours, window = _hours_arg(arg, 24)
                 data = _llm_view(ctx, since=time.time() - hours * 3600)
-                return render.render_llm(data, label=f"posledných {label}")
+                return render.render_llm(data, label_text=tr("scope.last_window", window))
             if word in ("settings", "nastavenia", "skills"):
-                hours, label = _hours_arg(rest, 168)
+                hours, window = _hours_arg(rest, 168)
                 data = _settings_view(ctx, since=time.time() - hours * 3600)
-                return render.render_settings(data, label=f"posledných {label}")
+                return render.render_settings(data, label_text=tr("scope.last_window", window))
             if word in ("touched", "zmeny", "hermes"):
-                session_id, since, label = _parse_scope(rest, kwargs.get("session_id") or None)
+                session_id, since, scope_label = _parse_scope(rest, kwargs.get("session_id") or None)
                 data = _touched(ctx, session_id=session_id, since=since, cwd=str(_session_cwd()))
-                return render.render_touched(data, label=label)
+                return render.render_touched(data, label_text=scope_label)
             if word in ("check", "refresh"):
                 fresh, text = True, rest
             elif word in ("local", "lokal"):
@@ -428,7 +434,7 @@ def _make_slash_handler(ctx: Any):
             return render.render(result)
         except Exception as exc:
             logger.warning("/repo failed: %s", exc)
-            return f"**Repo status:** chyba – {exc}"
+            return f"**Repo status:** {tr('error.internal_error')} – {exc}"
 
     return handle
 
@@ -437,84 +443,82 @@ def _make_slash_handler(ctx: Any):
 
 
 def _setup_cli(subparser: Any) -> None:
-    subparser.add_argument("path", nargs="?", default=None, help="adresár alebo súbor v repe (predvolene aktuálny adresár)")
-    subparser.add_argument("--json", action="store_true", help="výstup ako JSON")
-    subparser.add_argument("--diff", nargs="?", const="", default=None, metavar="SÚBOR", help="vypísať plný diff voči HEAD (bez súborov s tajomstvami)")
-    subparser.add_argument("--no-remote", action="store_true", help="neoverovať server")
-    subparser.add_argument("--fresh", action="store_true", help="overiť server bez cache")
-    subparser.add_argument("--touched", action="store_true", help="kam zapisoval Hermes (ledger), všetky sessions")
-    subparser.add_argument("--hours", type=float, default=None, help="okno v hodinách: --touched predvolene 24, --settings 168")
-    subparser.add_argument("--session", default=None, help="len jedna session (ID) pre --touched")
-    subparser.add_argument("--settings", action="store_true", help="F3: zmeny nastavení Hermesa (skills, pamäť, cron, config, SOUL, pluginy); okno cez --hours, predvolene 168")
-    subparser.add_argument("--llm", action="store_true", help="F4: volania LLM providerov (okno --hours, predvolene 24; --session ID)")
-    subparser.add_argument("--llm-call", type=int, default=None, metavar="ID", help="F4: detail jedného volania vrátane obsahu, ak sa ukladá")
-    subparser.add_argument("--env", action="store_true", help="premenné Hermesa (HERMES_*, TERMINAL_*) tohto procesu s popisom, bez tajomstiev")
-    subparser.add_argument("--disk", action="store_true", help="miesto na disku: Hermes a pracovné priečinky cache\\scratch (prepočíta, len čítanie)")
-    subparser.add_argument("--honcho", action="store_true", help="stav Honcho pamäte: provider, nastavenia (bez tajomstiev), spojenie, udalosti z logu")
-    subparser.add_argument("--import-history", action="store_true", help="F2b: doplniť ledger z histórie sessions (state.db, len čítanie)")
-    subparser.add_argument("--days", type=float, default=None, help="koľko dní histórie importovať (predvolene podľa uchovávania ledgeru, 90)")
-    subparser.add_argument("--dry-run", action="store_true", help="pri --import-history len spočítať, nič nezapísať")
+    subparser.add_argument("--lang", default=None, help="output language: en, zh, zh-hant, ja, ar, ru, fr, de, es (default: Hermes display language)")
+    subparser.add_argument("path", nargs="?", default=None, help="folder or file inside the repository (default: current directory)")
+    subparser.add_argument("--json", action="store_true", help="JSON output")
+    subparser.add_argument("--diff", nargs="?", const="", default=None, metavar="FILE", help="print the full diff against HEAD (secret-looking files excluded)")
+    subparser.add_argument("--no-remote", action="store_true", help="do not check the server")
+    subparser.add_argument("--fresh", action="store_true", help="check the server, bypassing the cache")
+    subparser.add_argument("--touched", action="store_true", help="where Hermes wrote files (ledger), all sessions")
+    subparser.add_argument("--hours", type=float, default=None, help="time window in hours: --touched default 24, --settings 168, --llm 24")
+    subparser.add_argument("--session", default=None, help="a single session ID for --touched / --llm")
+    subparser.add_argument("--settings", action="store_true", help="changes to Hermes settings (skills, memory, cron, config, SOUL, plugins)")
+    subparser.add_argument("--llm", action="store_true", help="calls to LLM providers")
+    subparser.add_argument("--llm-call", type=int, default=None, metavar="ID", help="one LLM call in detail, including content when captured")
+    subparser.add_argument("--env", action="store_true", help="Hermes environment variables (HERMES_*, TERMINAL_*) of this process, no secrets")
+    subparser.add_argument("--disk", action="store_true", help="disk usage of Hermes and its cache/scratch work folders (rescan, read-only)")
+    subparser.add_argument("--honcho", action="store_true", help="Honcho memory status: provider, settings (no secrets), connection, log events")
+    subparser.add_argument("--import-history", action="store_true", help="fill the ledger from session history (state.db, read-only)")
+    subparser.add_argument("--days", type=float, default=None, help="days of history to import (default: ledger retention, 90)")
+    subparser.add_argument("--dry-run", action="store_true", help="with --import-history: only count, write nothing")
+
+
+def _plain(text: str) -> str:
+    return text.replace("**", "").replace("`", "")
 
 
 def _make_cli_handler(ctx: Any):
     def handle(args: Any) -> int:
         _utf8_stdout()
+        from . import i18n
+
+        i18n.set_language(getattr(args, "lang", None))
         raw = getattr(args, "path", None)
         path = Path(raw).expanduser() if raw else Path(os.getcwd())
         if not path.is_absolute():
             path = Path(os.getcwd()) / path
+        as_json = getattr(args, "json", False)
+
+        def out(data: Any, text: str) -> None:
+            print(json.dumps(data, ensure_ascii=False, indent=2, default=str) if as_json else _plain(text))
+
         if getattr(args, "env", False):
-            data = _env_view("terminál (hermes CLI)")
-            if getattr(args, "json", False):
-                print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
-            else:
-                print(render.render_env(data, with_docs=True).replace("**", "").replace("`", ""))
+            data = _env_view(tr("env.process_cli"))
+            out(data, render.render_env(data, with_docs=True))
             return 0
         if getattr(args, "disk", False):
             root = ledger.hermes_root()
-            print("Počítam veľkosti priečinkov Hermesa (môže trvať desiatky sekúnd)…", file=sys.stderr)
+            print(tr("cli.disk_scanning"), file=sys.stderr)
             data = disk_usage.refresh(root, ledger.default_ledger_path(), root / "state.db")
-            if getattr(args, "json", False):
-                print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
-            else:
-                print(render.render_disk(data, max_scratch=40).replace("**", "").replace("`", ""))
+            out(data, render.render_disk(data, max_scratch=40))
             return 0
         if getattr(args, "honcho", False):
             data = honcho_status.status(ledger.hermes_root(), _hermes_config(), check=True, days=float(getattr(args, "days", None) or 7))
-            if getattr(args, "json", False):
-                print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
-            else:
-                print(render.render_honcho(data).replace("**", "").replace("`", ""))
+            out(data, render.render_honcho(data))
             return 0
         if getattr(args, "llm_call", None) is not None:
             item = _get_llm(ctx).content(args.llm_call)
             if item is None:
-                print(f"Volanie {args.llm_call} neexistuje.", file=sys.stderr)
+                print(tr("cli.llm_call_missing", args.llm_call), file=sys.stderr)
                 return 1
             print(json.dumps(item["call"], ensure_ascii=False, indent=2, default=str))
             if item["request"] is None and item["response"] is None:
-                print("\nObsah sa neukladá (nastavenie llm_capture_content je vypnuté) alebo už vypršal.", file=sys.stderr)
+                print("\n" + tr("cli.llm_content_missing"), file=sys.stderr)
             else:
-                print("\n── REQUEST ──\n" + (item["request"] or "(neuložený)"))
-                print("\n── RESPONSE ──\n" + (item["response"] or "(neuložený)"))
+                print("\n── REQUEST ──\n" + (item["request"] or tr("cli.not_stored")))
+                print("\n── RESPONSE ──\n" + (item["response"] or tr("cli.not_stored")))
             return 0
         if getattr(args, "llm", False):
             sid = getattr(args, "session", None)
             hours = float(getattr(args, "hours", None) or 24)
             data = _llm_view(ctx, since=None if sid else time.time() - hours * 3600, session_id=sid)
-            if getattr(args, "json", False):
-                print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
-            else:
-                label = f"session {sid}" if sid else f"posledných {hours:g} h"
-                print(render.render_llm(data, label=label).replace("**", "").replace("`", ""))
+            scope = f"session {sid}" if sid else tr("scope.last_window", f"{hours:g} h")
+            out(data, render.render_llm(data, label_text=scope))
             return 0
         if getattr(args, "settings", False):
             hours = float(getattr(args, "hours", None) or 168)
             data = _settings_view(ctx, since=time.time() - hours * 3600, force_scan=True)
-            if getattr(args, "json", False):
-                print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
-            else:
-                print(render.render_settings(data, label=f"posledných {hours / 24:g} d", max_items=200).replace("**", "").replace("`", ""))
+            out(data, render.render_settings(data, label_text=tr("scope.last_window", f"{hours / 24:g} d"), max_items=200))
             return 0
         if getattr(args, "import_history", False):
             s = _settings(ctx)
@@ -525,20 +529,17 @@ def _make_cli_handler(ctx: Any):
                 dry_run=getattr(args, "dry_run", False),
                 progress=lambda msg: print(msg, file=sys.stderr),
             )
-            if getattr(args, "json", False):
+            if as_json:
                 print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
             else:
                 print(history_import.render_report(report))
             return 1 if any(p.get("error") for p in report["profiles"]) else 0
         if getattr(args, "touched", False):
             sid = getattr(args, "session", None)
-            hours = float(getattr(args, "hours", 24) or 24)
+            hours = float(getattr(args, "hours", None) or 24)
             data = _touched(ctx, session_id=sid, since=None if sid else time.time() - hours * 3600, cwd=str(path))
-            if getattr(args, "json", False):
-                print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
-            else:
-                label = f"session {sid}" if sid else f"všetky sessions, posledných {hours:g} h"
-                print(render.render_touched(data, label=label, max_files=200).replace("**", "").replace("`", ""))
+            scope = f"session {sid}" if sid else tr("scope.all_sessions_window", f"{hours:g} h")
+            out(data, render.render_touched(data, label_text=scope, max_files=200))
             print(f"\nLedger: {ledger.default_ledger_path()}", file=sys.stderr)
             return 0
         diff = getattr(args, "diff", None)
@@ -547,16 +548,13 @@ def _make_cli_handler(ctx: Any):
             if not res.get("ok"):
                 print(res.get("message"), file=sys.stderr)
                 return 1
-            print(res["diff"] or "(žiadne zmeny voči HEAD)")
+            print(res["diff"] or tr("cli.no_diff"))
             if res["truncated"]:
-                print("\n… diff orezaný (limit 256 KB)", file=sys.stderr)
-            print(f"\nVynechané vzory: {', '.join(res['excluded_globs'])}", file=sys.stderr)
+                print("\n" + tr("cli.diff_truncated"), file=sys.stderr)
+            print("\n" + tr("cli.excluded_patterns", ", ".join(res["excluded_globs"])), file=sys.stderr)
             return 0
         result = _probe(ctx, path, check_remote=False if getattr(args, "no_remote", False) else None, fresh=getattr(args, "fresh", False))
-        if getattr(args, "json", False):
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-        else:
-            print(render.render(result, max_files=200).replace("**", "").replace("`", ""))
+        out(result, render.render(result, max_files=200))
         return 0 if result.get("ok") else 1
 
     return handle
@@ -592,7 +590,7 @@ def register(ctx: Any) -> None:
     ctx.register_command(
         "repo",
         _make_slash_handler(ctx),
-        description="Stav git repa: remote, git user, vetva, server, necommitnuté súbory",
+        description="Git repo status: remote, git user, branch, server, uncommitted files",
         args_hint="[check|local|help] [cesta]",
     )
     cli_handler = _make_cli_handler(ctx)

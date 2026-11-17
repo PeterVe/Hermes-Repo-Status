@@ -35,12 +35,12 @@ ATTRIBUTION_WINDOW = 15 * 60
 
 CATEGORY_LABELS = {
     "skill": "Skills",
-    "memory": "Pamäť",
-    "cron": "Plánované úlohy",
-    "config": "Konfigurácia",
+    "memory": "Memory",
+    "cron": "Scheduled jobs",
+    "config": "Configuration",
     "agent": "Agent (SOUL)",
-    "plugin": "Pluginy",
-    "hook": "Hooky",
+    "plugin": "Plugins",
+    "hook": "Hooks",
 }
 
 _last_scan: dict[str, float] = {}
@@ -196,7 +196,7 @@ def summarize_settings(events: list[dict[str, Any]], *, max_items: int = 50) -> 
         if not cat:
             continue
         item_name = str(ev.get("item") or "?")
-        if cat == "skill" and item_name.startswith("."):
+        if cat == "skill" and (item_name.startswith(".") or item_name == "(katalóg skills)"):
             item_name = _ledger.SKILLS_CATALOG_ITEM  # rows recorded before the catalog item existed
         c = cats.setdefault(cat, {"category": cat, "label": CATEGORY_LABELS.get(cat, cat), "items": {}, "last_ts": ev["ts"], "count": 0})
         c["count"] += 1

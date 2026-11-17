@@ -98,16 +98,16 @@ def run_git(
             creationflags=_CREATE_NO_WINDOW,
         )
     except FileNotFoundError as exc:
-        raise GitError("git nie je nainštalovaný alebo nie je v PATH") from exc
+        raise GitError("git is not installed or not on PATH") from exc
     except subprocess.TimeoutExpired as exc:
-        raise GitError(f"git {args[0] if args else ''} prekročil limit {timeout:g} s") from exc
+        raise GitError(f"git {args[0] if args else ''} exceeded the {timeout:g} s limit") from exc
     result = GitResult(
         proc.returncode,
         proc.stdout.decode("utf-8", errors="replace"),
         proc.stderr.decode("utf-8", errors="replace").strip(),
     )
     if check and result.code != 0:
-        raise GitError(result.err or f"git {' '.join(args)} skončil s kódom {result.code}")
+        raise GitError(result.err or f"git {' '.join(args)} exited with code {result.code}")
     return result
 
 
@@ -175,8 +175,8 @@ KIND_LABELS = {
     "forgejo": "Forgejo/Gitea",
     "bitbucket": "Bitbucket",
     "azure": "Azure DevOps",
-    "local": "lokálny adresár",
-    "other": "iné",
+    "local": "local folder",
+    "other": "other",
 }
 
 
@@ -536,12 +536,12 @@ def _has_commit(root: str, oid: str) -> bool:
 
 def _short_err(err: str) -> str:
     lines = [ln for ln in err.splitlines() if ln.strip()]
-    msg = lines[-1] if lines else "neznáma chyba"
+    msg = lines[-1] if lines else "unknown error"
     low = err.lower()
     if "not found" in low or "could not read username" in low or "authentication failed" in low:
-        msg += " (repo neexistuje alebo k nemu chýba prístup/prihlásenie)"
+        msg += " (repository missing, or no access / sign-in)"
     elif "could not resolve host" in low or "timed out" in low or "unable to access" in low:
-        msg += " (server nedostupný)"
+        msg += " (server unreachable)"
     return redact_text(msg)[:300]
 
 
@@ -562,7 +562,7 @@ def _iso(ts: float) -> str:
 def find_root(path: str | os.PathLike[str]) -> dict[str, Any] | None:
     p = Path(path)
     if not p.exists():
-        raise GitError(f"cesta neexistuje: {p}")
+        raise GitError(f"path does not exist: {p}")
     if p.is_file():
         p = p.parent
     res = run_git(p, "rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir", "--is-bare-repository")
@@ -622,11 +622,11 @@ def probe(
         repo = find_root(path)
         if repo is None:
             out["error"] = "not_a_repo"
-            out["message"] = f"{path} nie je v git repozitári"
+            out["message"] = f"{path} is not inside a git repository"
             return out
         if repo["bare"]:
             out["error"] = "bare_repo"
-            out["message"] = "bare repozitár nemá pracovný strom"
+            out["message"] = "a bare repository has no working tree"
             out["repo"] = repo
             return out
         root = repo["root"]
@@ -763,7 +763,7 @@ def full_diff(
     """Unified diff vs HEAD, with secret-looking files excluded and a size cap."""
     repo = find_root(path)
     if repo is None:
-        return {"ok": False, "message": f"{path} nie je v git repozitári"}
+        return {"ok": False, "message": f"{path} is not inside a git repository"}
     root = repo["root"]
     has_head = run_git(root, "rev-parse", "--verify", "-q", "HEAD").code == 0
     args = ["diff", "-M", "HEAD" if has_head else EMPTY_TREE, "--"]

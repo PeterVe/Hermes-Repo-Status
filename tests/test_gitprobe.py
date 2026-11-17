@@ -313,7 +313,7 @@ class RepoTests(unittest.TestCase):
         self.assertEqual(p["work_files"]["total"], 2)
         self.assertEqual(p["work_files"]["dirs"], {".hermes/": 2})
         self.assertTrue(p["summary"]["current"])  # work material does not break "all committed"
-        self.assertIn("Pracovné súbory Hermesa", render.render(p))
+        self.assertIn("Hermes work files", render.render(p))
         write(self.repo / "a.txt", "real change\n")
         p = self.probe()
         self.assertEqual((p["changes"]["total"], p["work_files"]["total"]), (1, 2))
@@ -335,12 +335,12 @@ class RepoTests(unittest.TestCase):
     def test_render(self):
         write(self.repo / "a.txt", "x\ny\n")
         text = render.render(self.probe())
-        self.assertIn("Lokálne repo", text)
+        self.assertIn("Local repository", text)
         self.assertIn("Git user", text)
         self.assertIn("`main`", text)
         self.assertIn("a.txt", text)
-        self.assertIn("necommitnuté zmeny", text)
-        self.assertIn("nie je", render.render(gitprobe.probe(self.base)))
+        self.assertIn("uncommitted changes", text)
+        self.assertIn("not inside a git repository", render.render(gitprobe.probe(self.base)))
 
 
 if __name__ == "__main__":
