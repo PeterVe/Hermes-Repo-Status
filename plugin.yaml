@@ -1,7 +1,7 @@
 manifest_version: 2
 name: repo-status
 label: Repo Status
-version: 0.4.0
+version: 0.5.0
 kind: standalone
 author: Peter Vesely
 license: MIT
@@ -32,6 +32,11 @@ config_schema:
     default: true
     label: Check the server
     description: Compare the branch with the server using git ls-remote (read-only, never fetch).
+  branches_show_prs:
+    type: bool
+    default: true
+    label: Open pull requests at server branches
+    description: List open pull requests next to the server branches using the GitHub CLI (gh), when it is installed and signed in.
   remote_cache_seconds:
     type: int
     default: 60

@@ -223,6 +223,69 @@ def render_honcho(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# ── server branches ──────────────────────────────────────────────────────────
+
+
+def branch_sync(b: dict[str, Any]) -> str:
+    sync = b.get("sync") or ""
+    if sync == "ahead":
+        return tr("branches.sync.ahead", b.get("ahead"))
+    if sync == "behind":
+        return tr("branches.sync.behind", b.get("behind"))
+    if sync == "diverged":
+        return tr("branches.sync.diverged", b.get("ahead"), b.get("behind"))
+    return label("branches.sync", sync)
+
+
+WEB_KINDS = ("github", "gitlab", "forgejo", "gitea", "codeberg")
+
+
+def render_branches(data: dict[str, Any], *, max_items: int = 40) -> str:
+    head = f"**{tr('branches.title')}**"
+    if not data.get("ok"):
+        return f"{head} – {label('error', data.get('error') or 'internal_error')}"
+    if data.get("status") == "no_remote":
+        return f"{head} – {tr('remote.no_remote')}"
+    if data.get("status") == "skipped":
+        return f"{head} – {tr('remote.skipped')}"
+    if data.get("status") == "error":
+        return f"{head} – {tr('remote.error')}: {data.get('error')}"
+    web = data.get("web_url") if data.get("kind") in WEB_KINDS else None
+    first = f"{head} – " + tr("branches.summary", data.get("count", 0), f"`{data.get('remote')}`", f"`{data.get('default') or '?'}`")
+    if data.get("cached"):
+        first += " · " + tr("branches.cached", ago(data.get("age_seconds")))
+    lines = [first, ""]
+    items = data.get("branches") or []
+    for b in items[:max_items]:
+        name = f"[`{b['name']}`]({web}/tree/{b['name']})" if web else f"`{b['name']}`"
+        tags = []
+        if b.get("current"):
+            tags.append("👉 " + tr("branches.current"))
+        if b.get("default"):
+            tags.append("⭐ " + tr("branches.default"))
+        bits = [name + (" " + " ".join(tags) if tags else ""), branch_sync(b)]
+        c = b.get("commit")
+        if c:
+            bits.append(f"{c['date'][:10]} {c['author']}")
+        for pr in b.get("prs") or []:
+            bits.append(("📝 " if pr.get("draft") else "🔀 ") + f"PR #{pr['number']}")
+        lines.append("- " + " · ".join(bits))
+    if len(items) > max_items:
+        lines.append(f"- … {tr('common.and_more', len(items) - max_items)}")
+    local_only = data.get("local_only") or []
+    if local_only:
+        shown = ", ".join(f"`{n}`" for n in local_only[:15])
+        if len(local_only) > 15:
+            shown += " " + tr("common.and_more", len(local_only) - 15)
+        lines += ["", tr("branches.local_only", len(local_only), shown)]
+    prs = data.get("prs") or {}
+    if prs.get("status") == "no_gh":
+        lines.append(tr("branches.no_gh"))
+    elif prs.get("status") == "error":
+        lines.append(tr("branches.pr_error", prs.get("error")))
+    return "\n".join(lines)
+
+
 # ── llm ──────────────────────────────────────────────────────────────────────
 
 

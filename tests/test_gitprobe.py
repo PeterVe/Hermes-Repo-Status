@@ -343,5 +343,82 @@ class RepoTests(unittest.TestCase):
         self.assertIn("not inside a git repository", render.render(gitprobe.probe(self.base)))
 
 
+class BranchesTests(unittest.TestCase):
+    """Server branches against a local bare "server" (no network, no gh: PRs unsupported)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name)
+        self.server = self.base / "server.git"
+        self.repo = self.base / "work"
+        self.other = self.base / "other"
+        git(self.base, "init", "-q", "--bare", "-b", "main", str(self.server))
+        git(self.base, "init", "-q", "-b", "main", str(self.repo))
+        write(self.repo / "a.txt", "one\n")
+        git(self.repo, "add", "a.txt")
+        git(self.repo, "commit", "-q", "-m", "init")
+        git(self.repo, "remote", "add", "origin", str(self.server))
+        git(self.repo, "push", "-q", "-u", "origin", "main")
+        # a colleague pushes a branch we never fetched
+        git(self.base, "clone", "-q", str(self.server), str(self.other))
+        git(self.other, "checkout", "-q", "-b", "colleague/feature")
+        write(self.other / "b.txt", "two\n")
+        git(self.other, "add", "b.txt")
+        git(self.other, "commit", "-q", "-m", "feature")
+        git(self.other, "push", "-q", "origin", "colleague/feature")
+        # our topic branch is one commit ahead of the server
+        git(self.repo, "checkout", "-q", "-b", "topic")
+        git(self.repo, "push", "-q", "-u", "origin", "topic")
+        write(self.repo / "c.txt", "three\n")
+        git(self.repo, "add", "c.txt")
+        git(self.repo, "commit", "-q", "-m", "local work")
+        git(self.repo, "branch", "only-here")
+        gitprobe.clear_remote_cache()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_parse_ls_remote(self):
+        raw = "ref: refs/heads/main\tHEAD\nabc\tHEAD\nabc\trefs/heads/main\ndef\trefs/heads/x/y\n"
+        heads, default = gitprobe.parse_ls_remote(raw)
+        self.assertEqual(default, "main")
+        self.assertEqual(heads, {"main": "abc", "x/y": "def"})
+
+    def test_branches(self):
+        r = gitprobe.remote_branches(self.repo, cache_seconds=0)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(r["default"], "main")
+        by = {b["name"]: b for b in r["branches"]}
+        self.assertEqual(set(by), {"main", "topic", "colleague/feature"})
+        self.assertEqual(r["branches"][0]["name"], "topic")  # current first
+        self.assertTrue(by["topic"]["current"])
+        self.assertEqual((by["topic"]["sync"], by["topic"]["ahead"], by["topic"]["behind"]), ("ahead", 1, 0))
+        self.assertTrue(by["main"]["default"])
+        self.assertEqual(by["main"]["sync"], "same")
+        self.assertEqual(by["colleague/feature"]["sync"], "server_only")
+        self.assertIsNone(by["colleague/feature"]["commit"])  # never fetched: no local commit
+        self.assertEqual(by["main"]["commit"]["subject"], "init")
+        self.assertEqual(r["local_only"], ["only-here"])
+        self.assertEqual(r["prs"]["status"], "unsupported")
+        text = render.render_branches(r)
+        self.assertIn("colleague/feature", text)
+        self.assertIn("only-here", text)
+
+    def test_no_remote(self):
+        git(self.repo, "remote", "remove", "origin")
+        r = gitprobe.remote_branches(self.repo, cache_seconds=0)
+        self.assertEqual(r["status"], "no_remote")
+
+    def test_cache_and_unreachable(self):
+        first = gitprobe.remote_branches(self.repo)
+        self.assertFalse(first["cached"])
+        self.assertTrue(gitprobe.remote_branches(self.repo)["cached"])
+        git(self.repo, "remote", "set-url", "origin", str(self.base / "gone.git"))
+        r = gitprobe.remote_branches(self.repo, fresh=True)
+        self.assertEqual(r["status"], "error")
+        self.assertEqual(r["branches"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

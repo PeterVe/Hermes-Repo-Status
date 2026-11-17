@@ -90,6 +90,7 @@ def _settings(ctx: Any) -> dict[str, Any]:
         host_kinds = {}
     return {
         "check_remote": bool(get("check_remote", True)),
+        "branches_show_prs": bool(get("branches_show_prs", True)),
         "remote_cache_seconds": _num(get("remote_cache_seconds", gitprobe.DEFAULT_REMOTE_CACHE_SECONDS), 60),
         "remote_timeout_seconds": _num(get("remote_timeout_seconds", gitprobe.DEFAULT_REMOTE_TIMEOUT), 8),
         "file_list_cap": int(_num(get("file_list_cap", gitprobe.DEFAULT_FILE_CAP), 200)),
@@ -142,6 +143,16 @@ def _resolve_path(raw: str | None) -> Path:
         return base
     p = Path(os.path.expandvars(os.path.expanduser(str(raw).strip().strip('"'))))
     return p if p.is_absolute() else base / p
+
+
+def _branches(ctx: Any, path: Path, *, fresh: bool = False) -> dict[str, Any]:
+    s = _settings(ctx)
+    if not s["check_remote"]:
+        return {"ok": True, "status": "skipped", "branches": []}
+    return gitprobe.remote_branches(
+        path, fresh=fresh, timeout=s["remote_timeout_seconds"], cache_seconds=s["remote_cache_seconds"],
+        host_kinds=s["host_kinds"], with_prs=s["branches_show_prs"],
+    )
 
 
 def _probe(ctx: Any, path: Path, *, check_remote: bool | None = None, fresh: bool = False, file_cap: int | None = None) -> dict[str, Any]:
@@ -371,6 +382,7 @@ SLASH_HELP_KEYS = (
     ("`/repo`", "help.repo"),
     ("`/repo <path>`", "help.path"),
     ("`/repo check [path]`", "help.check"),
+    ("`/repo branches [check] [path]`", "help.branches"),
     ("`/repo local [path]`", "help.local"),
     ("`/repo touched` · `touched all` · `touched 7d`", "help.touched"),
     ("`/repo settings [24h|7d|30d]`", "help.settings"),
@@ -426,6 +438,11 @@ def _make_slash_handler(ctx: Any):
                 session_id, since, scope_label = _parse_scope(rest, kwargs.get("session_id") or None)
                 data = _touched(ctx, session_id=session_id, since=since, cwd=str(_session_cwd()))
                 return render.render_touched(data, label_text=scope_label)
+            if word in ("branches", "branch", "vetvy"):
+                sub, _, path_text = rest.strip().partition(" ")
+                fresh_b = sub in ("check", "refresh")
+                target = _resolve_path(path_text if fresh_b else rest)
+                return render.render_branches(_branches(ctx, target, fresh=fresh_b))
             if word in ("check", "refresh"):
                 fresh, text = True, rest
             elif word in ("local", "lokal"):
@@ -449,6 +466,7 @@ def _setup_cli(subparser: Any) -> None:
     subparser.add_argument("--diff", nargs="?", const="", default=None, metavar="FILE", help="print the full diff against HEAD (secret-looking files excluded)")
     subparser.add_argument("--no-remote", action="store_true", help="do not check the server")
     subparser.add_argument("--fresh", action="store_true", help="check the server, bypassing the cache")
+    subparser.add_argument("--branches", action="store_true", help="all branches on the server (git ls-remote, no fetch) with open pull requests")
     subparser.add_argument("--touched", action="store_true", help="where Hermes wrote files (ledger), all sessions")
     subparser.add_argument("--hours", type=float, default=None, help="time window in hours: --touched default 24, --settings 168, --llm 24")
     subparser.add_argument("--session", default=None, help="a single session ID for --touched / --llm")
@@ -542,6 +560,10 @@ def _make_cli_handler(ctx: Any):
             out(data, render.render_touched(data, label_text=scope, max_files=200))
             print(f"\nLedger: {ledger.default_ledger_path()}", file=sys.stderr)
             return 0
+        if getattr(args, "branches", False):
+            data = _branches(ctx, path, fresh=getattr(args, "fresh", False))
+            out(data, render.render_branches(data, max_items=500))
+            return 0 if data.get("ok") else 1
         diff = getattr(args, "diff", None)
         if diff is not None:
             res = gitprobe.full_diff(path, file=diff or None)

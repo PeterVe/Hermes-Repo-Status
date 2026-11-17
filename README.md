@@ -57,6 +57,7 @@ Each machine keeps its own records in `HERMES_HOME\plugin-shared\repo-status\` (
 |---|---|---|
 | **Project, Primary folder, Files** | `/repo` · `hermes repo-status [path]` | the chat's project, its folders (git badge, click opens Explorer), folder contents |
 | **External repo, Branch, Git user** | `/repo`, `/repo check` | GitHub/GitLab/Forgejo/other (credentials hidden), branch and upstream, server state via `git ls-remote` (no fetch, 60 s cache), last commit, git identity and its scope |
+| **Server branches** | `/repo branches [check]` · `--branches` | every branch on the server (`git ls-remote`, no fetch): default, current, local copy, ahead/behind, last commit, link to the web, open pull requests via `gh` (GitHub); branches that exist only locally |
 | **Uncommitted, Hermes work** | `/repo` · `--diff` | uncommitted code changes with +/−; Hermes work files in `.hermes/` shown apart (they never count against "everything committed") |
 | **External comm., Sessions** | – | where the chat comes from (Desktop/Discord/…), the project's channels, sessions newest first (click switches), context fill used/max, providers |
 | **Where Hermes wrote** | `/repo touched [all\|7d]` · `--touched` | documented writes (`write_file`, `patch`, MCP), probable commands (`terminal`, `execute_code`), places outside the working folder ⚠️ |
@@ -91,6 +92,7 @@ Desktop **Settings → Plugins → repo-status** or `plugins.entries.repo-status
 | Key | Default | Meaning |
 |---|---|---|
 | `check_remote` | `true` | check the server with `git ls-remote` |
+| `branches_show_prs` | `true` | open pull requests at server branches (GitHub CLI `gh`, when signed in) |
 | `remote_cache_seconds`, `remote_timeout_seconds` | 60, 8 | server check cache and timeout |
 | `file_list_cap` | 200 | max. files in a list |
 | `host_kinds` | `{}` | own servers, e.g. `{"git.example.com": "forgejo"}` |

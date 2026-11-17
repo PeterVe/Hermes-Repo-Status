@@ -12,6 +12,7 @@ disabled and a timeout.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -443,6 +444,7 @@ _remote_cache_lock = threading.Lock()
 def clear_remote_cache() -> None:
     with _remote_cache_lock:
         _remote_cache.clear()
+    _branches_cache.clear()
 
 
 def check_remote(
@@ -698,6 +700,193 @@ def probe_remote(
         return {"status": "error", "error": redact_text(str(exc)), "checked_at": _iso(time.time())}
     except Exception as exc:
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}", "checked_at": _iso(time.time())}
+
+
+# ── all branches on the server (network, read-only) ──────────────────────────
+
+_branches_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+
+
+def _pick_remote(root: str, head: str | None) -> str | None:
+    if head:
+        remote = _git_config_value(root, f"branch.{head}.remote")
+        if remote and remote != ".":
+            return remote
+    names = run_git(root, "remote").out.split()
+    return "origin" if "origin" in names else (names[0] if names else None)
+
+
+def parse_ls_remote(raw: str) -> tuple[dict[str, str], str | None]:
+    """``git ls-remote --symref`` output → ({branch: sha}, default branch)."""
+    heads: dict[str, str] = {}
+    default = None
+    for line in raw.splitlines():
+        left, _, ref = line.partition("\t")
+        ref = ref.strip()
+        if left.startswith("ref: ") and ref == "HEAD":
+            target = left[5:].strip()
+            if target.startswith("refs/heads/"):
+                default = target[len("refs/heads/"):]
+        elif ref.startswith("refs/heads/"):
+            heads[ref[len("refs/heads/"):]] = left.strip()
+    return heads, default
+
+
+def _commit_info(root: str, shas: list[str]) -> dict[str, dict[str, Any]]:
+    """Subject/author/date for the commits that exist locally (one git call)."""
+    if not shas:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    proc = subprocess.run(
+        ["git", "--no-optional-locks", "-C", str(root), "cat-file", "--batch-check=%(objectname) %(objecttype)"],
+        input=("\n".join(shas) + "\n").encode(), capture_output=True, timeout=DEFAULT_TIMEOUT,
+        env=_base_env(), creationflags=_CREATE_NO_WINDOW,
+    )
+    if proc.returncode != 0:
+        return out
+    known = [ln.split()[0] for ln in proc.stdout.decode("utf-8", "replace").splitlines() if ln.endswith(" commit")]
+    if not known:
+        return out
+    res = run_git(root, "show", "-s", "--format=%H%x00%h%x00%s%x00%an%x00%aI", *known)
+    for line in res.out.splitlines():
+        parts = line.split("\0")
+        if len(parts) >= 5:
+            out[parts[0]] = {"short": parts[1], "subject": parts[2], "author": parts[3], "date": parts[4]}
+    return out
+
+
+def _open_prs(remote_url_repo: str | None, kind: str, timeout: float) -> dict[str, Any]:
+    """Open pull requests per head branch via the GitHub CLI (optional; never required)."""
+    if kind != "github" or not remote_url_repo:
+        return {"status": "unsupported"}
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "list", "--repo", remote_url_repo, "--state", "open", "--limit", "100",
+             "--json", "number,headRefName,title,isDraft,url"],
+            capture_output=True, timeout=timeout, env=_base_env(network=True), stdin=subprocess.DEVNULL,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    except FileNotFoundError:
+        return {"status": "no_gh"}
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "error": "gh timed out"}
+    if proc.returncode != 0:
+        lines = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+        return {"status": "error", "error": redact_text(lines[-1] if lines else "gh failed")[:200]}
+    try:
+        items = json.loads(proc.stdout.decode("utf-8", "replace") or "[]")
+    except ValueError:
+        return {"status": "error", "error": "unexpected gh output"}
+    by_branch: dict[str, list[dict[str, Any]]] = {}
+    for pr in items if isinstance(items, list) else []:
+        by_branch.setdefault(str(pr.get("headRefName")), []).append(
+            {"number": pr.get("number"), "title": pr.get("title"), "draft": bool(pr.get("isDraft")), "url": pr.get("url")})
+    return {"status": "ok", "by_branch": by_branch, "count": len(items) if isinstance(items, list) else 0}
+
+
+def remote_branches(
+    path: str | os.PathLike[str],
+    *,
+    remote: str | None = None,
+    fresh: bool = False,
+    timeout: float = DEFAULT_REMOTE_TIMEOUT,
+    cache_seconds: float = DEFAULT_REMOTE_CACHE_SECONDS,
+    host_kinds: dict[str, str] | None = None,
+    with_prs: bool = True,
+) -> dict[str, Any]:
+    """Every branch on the server (``git ls-remote``, never fetch) compared with the local
+    branches: default, current, local copy, ahead/behind when the commit is local, last commit,
+    open pull requests (GitHub via ``gh``). Never raises."""
+    now = time.time()
+    try:
+        repo = find_root(path)
+        if repo is None or repo["bare"]:
+            return {"ok": False, "error": "not_a_repo"}
+        root = repo["root"]
+        st = run_git(root, "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=no")
+        head = parse_status_v2(st.out, 0)["branch"].get("head")
+        remote = remote or _pick_remote(root, head)
+        if not remote:
+            return {"ok": True, "remote": None, "status": "no_remote", "branches": []}
+        key = (str(root), remote)
+        if not fresh and cache_seconds > 0:
+            hit = _branches_cache.get(key)
+            if hit and now - hit[0] < cache_seconds:
+                return {**hit[1], "cached": True, "age_seconds": int(now - hit[0])}
+
+        url_info = next((r for r in read_remotes(root, host_kinds) if r["name"] == remote), None)
+        res = run_git(root, "ls-remote", "--symref", "--", remote, "HEAD", "refs/heads/*", timeout=timeout, network=True)
+        if res.code != 0:
+            return {"ok": True, "remote": remote, "status": "error", "error": _short_err(res.err), "branches": [], "checked_at": _iso(now)}
+        heads, default = parse_ls_remote(res.out)
+
+        local: dict[str, dict[str, str]] = {}
+        fe = run_git(root, "for-each-ref", "refs/heads", "--format=%(refname:short)%00%(objectname)%00%(upstream:short)")
+        for line in fe.out.splitlines():
+            parts = line.split("\0")
+            if len(parts) == 3:
+                local[parts[0]] = {"sha": parts[1], "upstream": parts[2]}
+        tracking = {}
+        tr_ = run_git(root, "for-each-ref", f"refs/remotes/{remote}", "--format=%(refname)%00%(objectname)")
+        for line in tr_.out.splitlines():
+            ref, _, sha = line.partition("\0")
+            name = ref[len(f"refs/remotes/{remote}/"):]
+            if name != "HEAD":
+                tracking[name] = sha
+
+        info = _commit_info(root, sorted(set(heads.values())))
+        branches = []
+        for name, sha in heads.items():
+            loc = next((b for b, v in local.items() if v["upstream"] == f"{remote}/{name}"), None) or (name if name in local else None)
+            item: dict[str, Any] = {
+                "name": name, "sha": sha, "short": sha[:7], "default": name == default, "current": loc is not None and loc == head,
+                "local": loc, "commit": info.get(sha), "fetched": tracking.get(name) == sha,
+            }
+            if loc:
+                lsha = local[loc]["sha"]
+                if lsha == sha:
+                    item["sync"] = "same"
+                elif sha in info:
+                    counts = run_git(root, "rev-list", "--left-right", "--count", f"{lsha}...{sha}").out.split()
+                    if len(counts) == 2:
+                        a, b = int(counts[0]), int(counts[1])
+                        item.update(ahead=a, behind=b, sync="diverged" if a and b else "ahead" if a else "behind" if b else "same")
+                else:
+                    item["sync"] = "server_newer"  # the server commit is not local: fetch would bring it
+            else:
+                item["sync"] = "server_only"
+            branches.append(item)
+        local_only = [b for b in local if not any(x.get("local") == b for x in branches)]
+
+        prs = _open_prs(url_info.get("repo") if url_info else None, url_info.get("kind") if url_info else "", timeout) if with_prs else {"status": "off"}
+        for item in branches:
+            item["prs"] = (prs.get("by_branch") or {}).get(item["name"], [])
+
+        def order(b: dict[str, Any]) -> tuple:
+            return (not b["current"], not b["default"], -(_ts(b["commit"]["date"]) if b.get("commit") else 0), b["name"])
+
+        branches.sort(key=order)
+        result = {
+            "ok": True, "remote": remote, "status": "ok", "default": default, "branches": branches, "count": len(branches),
+            "local_only": local_only, "prs": {k: v for k, v in prs.items() if k != "by_branch"},
+            "web_url": url_info.get("web_url") if url_info else None, "kind": url_info.get("kind") if url_info else None,
+            "checked_at": _iso(now), "cached": False, "age_seconds": 0,
+        }
+        _branches_cache[key] = (now, {k: v for k, v in result.items() if k not in ("cached", "age_seconds")})
+        return result
+    except GitError as exc:
+        return {"ok": False, "error": "git_error", "message": redact_text(str(exc))}
+    except Exception as exc:
+        return {"ok": False, "error": "internal_error", "message": f"{type(exc).__name__}: {exc}"}
+
+
+def _ts(iso: str | None) -> float:
+    if not iso:
+        return 0.0
+    try:
+        return datetime.fromisoformat(iso).timestamp()
+    except ValueError:
+        return 0.0
 
 
 def _last_commit(root: str) -> dict[str, Any] | None:

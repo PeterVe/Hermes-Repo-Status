@@ -157,6 +157,7 @@ def _settings() -> dict[str, Any]:
     return {
         "work_dirs": tuple(str(w).strip() for w in work_dirs if str(w).strip()),
         "check_remote": bool(s.get("check_remote", True)),
+        "branches_show_prs": bool(s.get("branches_show_prs", True)),
         "remote_cache_seconds": num("remote_cache_seconds", gitprobe.DEFAULT_REMOTE_CACHE_SECONDS),
         "remote_timeout_seconds": num("remote_timeout_seconds", gitprobe.DEFAULT_REMOTE_TIMEOUT),
         "file_list_cap": int(num("file_list_cap", gitprobe.DEFAULT_FILE_CAP)),
@@ -269,6 +270,23 @@ async def remote(cwd: str, fresh: bool = False) -> dict[str, Any]:
         fresh=fresh,
         remote_timeout=s["remote_timeout_seconds"],
         remote_cache_seconds=s["remote_cache_seconds"],
+    )
+
+
+@router.get("/branches")
+async def branches(cwd: str, fresh: bool = False) -> dict[str, Any]:
+    path = _check_cwd(cwd)
+    s = _settings()
+    if not s["check_remote"]:
+        return {"ok": True, "status": "skipped", "branches": []}
+    return await run_in_threadpool(
+        gitprobe.remote_branches,
+        path,
+        fresh=fresh,
+        timeout=s["remote_timeout_seconds"],
+        cache_seconds=s["remote_cache_seconds"],
+        host_kinds=s["host_kinds"],
+        with_prs=s["branches_show_prs"],
     )
 
 

@@ -84,9 +84,11 @@ function toMessages(flat) {
 const q = v => encodeURIComponent(v || '')
 const localKey = cwd => [PLUGIN_ID, 'local', cwd]
 const remoteKey = cwd => [PLUGIN_ID, 'remote', cwd]
+const branchesKey = cwd => [PLUGIN_ID, 'branches', cwd]
 
 const fetchLocal = cwd => api.rest(`/status?cwd=${q(cwd)}&remote=false`, { timeoutMs: 20_000 })
 const fetchRemote = (cwd, fresh = false) => api.rest(`/remote?cwd=${q(cwd)}${fresh ? '&fresh=true' : ''}`, { timeoutMs: 30_000 })
+const fetchBranches = (cwd, fresh = false) => api.rest(`/branches?cwd=${q(cwd)}${fresh ? '&fresh=true' : ''}`, { timeoutMs: 45_000 })
 
 async function refreshAll(cwd, fresh) {
   if (!api) return
@@ -95,6 +97,9 @@ async function refreshAll(cwd, fresh) {
   await queryClient.invalidateQueries({ queryKey: localKey(cwd) })
   await queryClient.invalidateQueries({ queryKey: [PLUGIN_ID, 'touched'] })
   if (fresh) {
+    void fetchBranches(cwd, true)
+      .then(d => queryClient.setQueryData(branchesKey(cwd), d))
+      .catch(() => {})
     try {
       queryClient.setQueryData(remoteKey(cwd), await fetchRemote(cwd, true))
     } catch (error) {
@@ -472,6 +477,114 @@ function RemoteSection({ data }) {
     more: rest.length ? rest.map(r => jsx('div', { className: 'text-xs', children: line(r) }, r.name)) : null,
     children: line(first)
   })
+}
+
+// Every branch on the server (git ls-remote, never fetch) next to the local ones.
+function branchSync(b) {
+  if (b.sync === 'ahead') return T('branches.sync.ahead', b.ahead)
+  if (b.sync === 'behind') return T('branches.sync.behind', b.behind)
+  if (b.sync === 'diverged') return T('branches.sync.diverged', b.ahead, b.behind)
+  return L('branches.sync', b.sync)
+}
+
+const SYNC_TONE = { same: 'good', ahead: 'warn', behind: 'warn', diverged: 'bad', server_newer: 'warn', server_only: 'muted' }
+const WEB_KINDS = ['github', 'gitlab', 'forgejo', 'gitea', 'codeberg']
+
+function BranchLine({ b, web }) {
+  const c = b.commit
+  const tip = [b.name, branchSync(b), b.local && b.local !== b.name ? T('branches.local', b.local) : null, c ? `${c.short} ${c.subject}\n${c.author} · ${c.date}` : b.short]
+    .filter(Boolean)
+    .join('\n')
+  return jsxs('div', {
+    className: 'flex min-w-0 items-center gap-1.5 text-[0.6875rem]',
+    title: tip,
+    children: [
+      jsx(StatusDot, { tone: SYNC_TONE[b.sync] || 'muted' }),
+      web
+        ? jsx('button', {
+            type: 'button',
+            title: T('branches.open_on_web'),
+            onClick: () => void api?.openExternal(`${web}/tree/${b.name.split('/').map(encodeURIComponent).join('/')}`),
+            className: `min-w-0 truncate text-left font-mono ${b.current ? 'font-semibold' : ''} text-foreground underline decoration-dotted underline-offset-2 hover:text-sky-500`,
+            children: b.name
+          })
+        : jsx('span', { className: 'min-w-0 truncate font-mono text-foreground', children: b.name }),
+      b.current ? jsx('span', { className: 'shrink-0 text-sky-500', children: T('branches.current') }) : null,
+      b.default ? jsx('span', { className: 'shrink-0 rounded border border-(--ui-border) px-1 text-[0.625rem] leading-4', children: T('branches.default') }) : null,
+      ...(b.prs || []).map(pr =>
+        jsx(
+          'button',
+          {
+            type: 'button',
+            title: pr.title,
+            onClick: () => void api?.openExternal(pr.url),
+            className: `shrink-0 rounded px-1 text-[0.625rem] leading-4 ${pr.draft ? 'bg-(--ui-border) text-(--ui-text-tertiary)' : 'bg-emerald-500/15 text-emerald-600'} hover:underline`,
+            children: `PR #${pr.number}`
+          },
+          pr.number
+        )
+      ),
+      jsx('span', { className: 'ml-auto shrink-0 text-(--ui-text-tertiary)', children: [branchSync(b), c ? ` · ${age(c.date)}` : ''].join('') })
+    ]
+  })
+}
+
+function BranchesSection({ cwd, data }) {
+  const hasRemote = (data.remotes || []).length > 0
+  const query = useQuery({
+    queryKey: branchesKey(cwd),
+    queryFn: () => fetchBranches(cwd),
+    enabled: Boolean(api && cwd && hasRemote),
+    staleTime: 60_000,
+    refetchInterval: 5 * 60_000
+  })
+  if (!hasRemote) return null
+  const d = query.data
+  const items = d?.branches || []
+  const web = WEB_KINDS.includes(d?.kind) ? d?.web_url : null
+  const label = d?.count != null ? `${T('branches.title')} (${d.count})` : T('branches.title')
+  let value
+  if (query.isLoading) value = jsx('span', { className: 'text-(--ui-text-tertiary)', children: T('branches.loading') })
+  else if (query.isError) value = jsx('span', { className: 'text-destructive', children: errText(query.error) })
+  else if (d?.status === 'skipped') value = T('remote.skipped')
+  else if (d?.status === 'error') value = jsx('span', { className: 'text-destructive', title: d.error, children: T('remote.error') })
+  else if (!d?.ok) value = jsx('span', { className: 'text-destructive', children: L('error', d?.error || 'internal_error') })
+  else {
+    const serverOnly = items.filter(b => b.sync === 'server_only').length
+    const prCount = d.prs?.count || 0
+    value = jsxs('span', {
+      className: 'inline-flex min-w-0 flex-wrap items-center gap-1.5',
+      children: [
+        jsx('span', { children: T('branches.summary', d.count, d.remote, d.default || '?') }),
+        serverOnly ? jsx('span', { className: 'text-(--ui-text-tertiary)', children: `· ${serverOnly} ${L('branches.sync', 'server_only')}` }) : null,
+        prCount ? jsx('span', { className: 'text-emerald-600', children: `· ${prCount} PR` }) : null
+      ]
+    })
+  }
+  const more = d?.ok && items.length
+    ? [
+        ...items.map(b => jsx(BranchLine, { b, web }, b.name)),
+        (d.local_only || []).length
+          ? jsx('div', { className: 'pt-1 text-[0.6875rem] text-(--ui-text-tertiary)', title: d.local_only.join('\n'), children: T('branches.local_only', d.local_only.length, d.local_only.slice(0, 8).join(', ') + (d.local_only.length > 8 ? ' …' : '')) }, 'lo')
+          : null,
+        d.prs?.status === 'no_gh' ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: T('branches.no_gh') }, 'gh') : null,
+        d.prs?.status === 'error' ? jsx('div', { className: 'text-[0.6875rem] text-amber-500', children: T('branches.pr_error', d.prs.error) }, 'ghe') : null,
+        jsxs('div', {
+          className: 'flex items-center gap-1.5 pt-1 text-[0.6875rem] text-(--ui-text-tertiary)',
+          children: [
+            jsx('span', { children: T('branches.cached', ago(d.checked_at)) }),
+            jsx('button', {
+              type: 'button',
+              disabled: query.isFetching,
+              onClick: () => void fetchBranches(cwd, true).then(x => queryClient.setQueryData(branchesKey(cwd), x)).catch(e => host.notifyError(e, T('ui.server_check_failed'))),
+              className: 'ml-auto rounded border border-(--ui-border) px-1.5 py-0.5 text-foreground hover:bg-(--chrome-action-hover) disabled:opacity-40',
+              children: T('branches.refresh')
+            })
+          ]
+        }, 'rf')
+      ]
+    : null
+  return jsx(Field, { label, more, children: value })
 }
 
 function GitSection({ data, remoteCheck }) {
@@ -1543,7 +1656,7 @@ function RepoPane() {
     })
   } else if (isRepo) {
     body = jsxs(Section, {
-      children: [jsx(RemoteSection, { data }), jsx(GitSection, { data, remoteCheck }), jsx(UncommittedSection, { data }), jsx(WorkFilesSection, { data })]
+      children: [jsx(RemoteSection, { data }), jsx(BranchesSection, { cwd, data }), jsx(GitSection, { data, remoteCheck }), jsx(UncommittedSection, { data }), jsx(WorkFilesSection, { data })]
     })
   } else if (!cwd && !project) {
     body = jsx('div', { className: 'px-3 py-3 text-xs text-(--ui-text-tertiary)', children: T('ui.open_chat_hint') })
@@ -1983,6 +2096,25 @@ const EN = {
   "ui.refresh_check": "Refresh and check the server",
   "ui.refresh": "Refresh",
   "ui.open_chat_hint": "Open a chat with a working folder or a project.",
-  "ui.click_opens_diff": "click opens the diff"
+  "ui.click_opens_diff": "click opens the diff",
+  "branches.title": "Server branches",
+  "branches.summary": "{0} on {1} · default {2}",
+  "branches.cached": "checked {0}",
+  "branches.current": "current",
+  "branches.default": "default",
+  "branches.local": "local: {0}",
+  "branches.sync.same": "same as local",
+  "branches.sync.server_only": "only on the server",
+  "branches.sync.server_newer": "the server has newer commits (not fetched)",
+  "branches.sync.ahead": "local is {0} ahead",
+  "branches.sync.behind": "local is {0} behind",
+  "branches.sync.diverged": "diverged: local +{0}, server +{1}",
+  "branches.local_only": "Only local ({0}): {1}",
+  "branches.no_gh": "Open pull requests: install and sign in to the GitHub CLI (gh).",
+  "branches.pr_error": "Open pull requests could not be read: {0}",
+  "branches.loading": "reading branches from the server…",
+  "branches.refresh": "Check the server again",
+  "branches.open_on_web": "Open on the web",
+  "help.branches": "all branches on the server: default, local copy, ahead/behind, last commit, open PRs"
 }
 // @@EN-END
