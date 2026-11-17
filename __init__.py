@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import disk_usage, env_vars, gitprobe, history_import, honcho_status, ledger, llm_log, render, settings_watch
+from . import disk_usage, env_vars, export, gitprobe, history_import, honcho_status, ledger, llm_log, render, settings_watch
 from .i18n import tr
 
 
@@ -101,6 +101,11 @@ def _settings(ctx: Any) -> dict[str, Any]:
         "llm_log": bool(get("llm_log", True)),
         "llm_capture_content": bool(get("llm_capture_content", False)),
         "llm_content_retention_days": _num(get("llm_content_retention_days", llm_log.DEFAULT_CONTENT_RETENTION_DAYS), 7),
+        "export_dir": str(get("export_dir", "")).strip(),
+        "export_include_secrets": bool(get("export_include_secrets", False)),
+        "export_include_scratch": bool(get("export_include_scratch", False)),
+        "export_scratch_cap_mb": int(_num(get("export_scratch_cap_mb", 500), 500)),
+        "export_keep_last": int(_num(get("export_keep_last", 0), 0)),
     }
 
 
@@ -390,6 +395,7 @@ SLASH_HELP_KEYS = (
     ("`/repo honcho`", "help.honcho"),
     ("`/repo env`", "help.env"),
     ("`/repo disk [refresh]`", "help.disk"),
+    ("`/repo export [status|dry]`", "export.help"),
 )
 
 
@@ -408,6 +414,11 @@ def _make_slash_handler(ctx: Any):
             check_remote = None
             if word in ("help", "pomoc", "?"):
                 return slash_help()
+            if word == "export":
+                if rest.strip() == "status":
+                    return _export_text(export.status())
+                data = export.start(_settings(ctx), cwd=str(_session_cwd()), dry_run=rest.strip() == "dry")
+                return _export_text(data)
             if word in ("env", "premenne", "premenné", "vars"):
                 data = _env_view("gateway")
                 # what the next tool command of THIS chat would receive
@@ -460,6 +471,7 @@ def _make_slash_handler(ctx: Any):
 
 
 def _setup_cli(subparser: Any) -> None:
+    subparser.add_argument("--export", action="store_true", help=tr("export.cli_help"))
     subparser.add_argument("--lang", default=None, help="output language: en, zh, zh-hant, ja, ar, ru, fr, de, es (default: Hermes display language)")
     subparser.add_argument("path", nargs="?", default=None, help="folder or file inside the repository (default: current directory)")
     subparser.add_argument("--json", action="store_true", help="JSON output")
@@ -478,11 +490,38 @@ def _setup_cli(subparser: Any) -> None:
     subparser.add_argument("--honcho", action="store_true", help="Honcho memory status: provider, settings (no secrets), connection, log events")
     subparser.add_argument("--import-history", action="store_true", help="fill the ledger from session history (state.db, read-only)")
     subparser.add_argument("--days", type=float, default=None, help="days of history to import (default: ledger retention, 90)")
-    subparser.add_argument("--dry-run", action="store_true", help="with --import-history: only count, write nothing")
+    subparser.add_argument("--dry-run", action="store_true", help=tr("export.dry_help"))
 
 
 def _plain(text: str) -> str:
     return text.replace("**", "").replace("`", "")
+
+
+def _export_progress(data: dict[str, Any]) -> str:
+    step = str(data.get("step") or "estimate")
+    label = tr("export.step." + step) if step in {"estimate", "collect", "archive", "verify", "cleanup"} else step
+    return tr("export.progress", label, data.get("files", 0), data.get("bytes", 0), data.get("percent", 0))
+
+
+def _export_text(data: dict[str, Any]) -> str:
+    if data.get("error"):
+        text = str(data["error"])
+        if data.get("work_dir"):
+            text += "\n" + tr("export.work_dir") + ": " + str(data["work_dir"])
+        return text
+    if data.get("state") == "running" or data.get("running"):
+        return tr("export.started") + "\n" + _export_progress(data)
+    state = str(data.get("state") or "idle")
+    label = tr("export.state." + state) if state in {"idle", "running", "dry_run", "completed", "error"} else state
+    text = tr("export.summary", label, data.get("files", 0), data.get("estimated_bytes", 0))
+    archive = data.get("path") or data.get("archive")
+    if archive:
+        text += "\n" + str(archive)
+    if data.get("work_dir"):
+        text += "\n" + tr("export.work_dir") + ": " + str(data["work_dir"])
+    for warning in data.get("warnings") or []:
+        text += "\n⚠ " + str(warning)
+    return text
 
 
 def _make_cli_handler(ctx: Any):
@@ -499,6 +538,17 @@ def _make_cli_handler(ctx: Any):
 
         def out(data: Any, text: str) -> None:
             print(json.dumps(data, ensure_ascii=False, indent=2, default=str) if as_json else _plain(text))
+
+        if getattr(args, "export", False):
+            def progress(state: Any) -> None:
+                if isinstance(state, dict):
+                    print(_export_progress(state), file=sys.stderr)
+                else:
+                    print(str(state), file=sys.stderr)
+            data = export.start(_settings(ctx), cwd=str(path), dry_run=getattr(args, "dry_run", False),
+                                background=False, progress=progress)
+            out(data, _export_text(data))
+            return 0 if data.get("ok") else 1
 
         if getattr(args, "env", False):
             data = _env_view(tr("env.process_cli"))

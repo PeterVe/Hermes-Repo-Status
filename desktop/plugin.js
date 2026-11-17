@@ -1,5 +1,6 @@
 // Repo Status — Hermes Desktop half (disk plugin: plain ESM, no JSX, no build).
-// Reads the read-only backend in ../dashboard/plugin_api.py through ctx.rest.
+// Reads the backend in ../dashboard/plugin_api.py through ctx.rest.
+// Export is the sole project-writing operation and stays inside export_dir.
 //
 // Layout (top → bottom):
 //   Project: <name>                                   [diff] [refresh]
@@ -1385,6 +1386,133 @@ function DiskSection() {
   })
 }
 
+// ── Project export (the only operation that writes export files) ─────────────
+
+function exportRunning(d) {
+  return Boolean(d?.running || ['running', 'queued', 'starting', 'estimating', 'collecting', 'archiving', 'verifying', 'cleaning'].includes(d?.status || d?.state))
+}
+
+function ExportSection({ project, cwd }) {
+  const [pending, setPending] = useState(false)
+  const [startError, setStartError] = useState('')
+  const submitting = useRef(false)
+  const query = useQuery({
+    queryKey: [PLUGIN_ID, 'export-status'],
+    queryFn: () => api.rest('/export/status'),
+    enabled: Boolean(api),
+    staleTime: 5_000,
+    // v5 receives the Query; v4 receives data (whose state may be a string).
+    refetchInterval: a => exportRunning(a?.state && typeof a.state === 'object' ? a.state.data : a) ? 2_000 : 30_000
+  })
+  const d = query.data
+  const enabled = Boolean(!query.isError && d?.enabled && d?.export_dir?.trim())
+  const running = exportRunning(d)
+  const wasRunning = useRef(running)
+  useEffect(() => {
+    if (wasRunning.current && !running) void queryClient.invalidateQueries({ queryKey: [PLUGIN_ID, 'export-list'] })
+    wasRunning.current = running
+  }, [running])
+  const code = d?.status || d?.state || 'idle'
+  const state = running ? 'running' : ['completed', 'complete', 'done', 'success'].includes(code) ? 'completed'
+    : ['dry_run', 'estimated', 'dry', 'dry-run'].includes(code) ? 'dry_run' : ['error', 'failed'].includes(code) ? 'error' : 'idle'
+  const stepCode = { estimating: 'estimate', collecting: 'collect', archiving: 'archive', zip: 'archive', verifying: 'verify', cleaning: 'cleanup' }[d?.step] || d?.step
+  const step = ['estimate', 'collect', 'archive', 'verify', 'cleanup'].includes(stepCode) ? T(`export.step.${stepCode}`) : T(`export.state.${state}`)
+  const percent = d?.percent != null && Number.isFinite(Number(d.percent)) ? Math.max(0, Math.min(100, Number(d.percent))) : null
+  const latest = useRef(null)
+  latest.current = { project, cwd, d, enabled, running }
+  const start = async dryRun => {
+    const current = latest.current
+    const directories = (current.project?.folders || []).map(f => f.path).filter(Boolean)
+    if (submitting.current || !current.enabled || current.running || !(directories.length || current.cwd)) return
+    submitting.current = true
+    setPending(true)
+    setStartError('')
+    try {
+      const result = await api.rest('/export', {
+        method: 'POST',
+        body: { project: current.project, directories, dry_run: dryRun, cwd: current.cwd }
+      })
+      if (result?.ok === false || result?.error) throw new Error(result.error || T('export.state.error'))
+      queryClient.setQueryData([PLUGIN_ID, 'export-status'], { ...current.d, ...result })
+    } catch (error) {
+      setStartError(errText(error))
+    } finally {
+      submitting.current = false
+      setPending(false)
+      void queryClient.invalidateQueries({ queryKey: [PLUGIN_ID, 'export-status'] })
+    }
+  }
+  const listing = useQuery({
+    queryKey: [PLUGIN_ID, 'export-list', d?.export_dir || ''],
+    queryFn: () => api.rest('/export/list'),
+    enabled: Boolean(api && enabled),
+    staleTime: 10_000,
+    refetchInterval: 60_000
+  })
+  const reveal = (path, name) => jsx('button', {
+    type: 'button',
+    title: T('export.reveal', path),
+    onClick: () => void api?.revealPath(path),
+    className: 'min-w-0 truncate text-left font-mono text-[0.6875rem] text-foreground underline decoration-dotted underline-offset-2 hover:text-(--ui-accent)',
+    children: name || tailPath(path)
+  })
+  const error = query.isError ? errText(query.error) : startError || d?.error
+  return jsxs(Section, {
+    title: T('export.title'),
+    children: [
+      jsx(Field, { label: T('export.directory'), children: enabled ? d.export_dir : T('export.disabled') }),
+      jsx(Field, { label: T('export.status_label'), children: running
+        ? T('export.progress', step, d.files ?? 0, d.bytes ?? d.estimated_bytes ?? 0, percent ?? '—')
+        : T(`export.state.${state}`) }),
+      d?.estimated_bytes != null ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-secondary)', children: T('export.estimate', fmtSize(d.estimated_bytes)) }) : null,
+      running ? jsx('progress', { max: 100, ...(percent == null ? {} : { value: percent }), 'aria-label': T('export.status_label'), className: 'my-1 h-1.5 w-full accent-(--ui-accent)' }) : null,
+      jsxs('div', {
+        className: 'flex items-center gap-1.5 text-[0.6875rem]',
+        children: [false, true].map(dry => jsx('button', {
+          type: 'button',
+          disabled: !enabled || pending || running || !(project?.folders?.length || cwd),
+          onClick: () => start(dry),
+          className: 'rounded border border-(--ui-border) px-1.5 py-0.5 text-foreground hover:bg-(--chrome-action-hover) disabled:opacity-40',
+          children: dry ? T('export.dry_run') : T('export.action')
+        }, String(dry)))
+      }),
+      query.isLoading ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: T('export.loading') }) : null,
+      !(project?.folders?.length || cwd) ? jsx('div', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: T('export.no_project') }) : null,
+      error ? jsx('div', { role: 'alert', className: 'mt-1 break-words text-xs text-destructive', children: T('export.error', String(error)) }) : null,
+      (d?.warnings || []).map((warning, index) => jsx('div', {
+        role: 'status', className: 'mt-1 break-words text-xs text-(--ui-text-secondary)', children: `⚠ ${String(warning)}`
+      }, `warning-${index}`)),
+      d?.work_dir && (running || state === 'error') ? jsx(Field, { label: T('export.work_dir'), children: reveal(d.work_dir) }) : null,
+      (d?.path || d?.archive) && !running && state === 'completed' ? jsx(Field, { label: T('export.archive'), children: reveal(d.path || d.archive) }) : null,
+      jsx(Field, {
+        label: T('export.recent'),
+        actions: jsx('button', {
+          type: 'button',
+          onClick: async () => {
+            await Promise.all([
+              queryClient.invalidateQueries({ queryKey: [PLUGIN_ID, 'export-status'] }),
+              queryClient.invalidateQueries({ queryKey: [PLUGIN_ID, 'export-list'] })
+            ])
+          },
+          className: 'rounded border border-(--ui-border) px-1.5 py-0.5 text-[0.6875rem] text-foreground hover:bg-(--chrome-action-hover)',
+          children: T('export.refresh')
+        }),
+        children: listing.isError
+          ? jsx('span', { role: 'alert', className: 'text-destructive', children: T('export.error', errText(listing.error)) })
+          : listing.isLoading ? T('export.loading')
+          : !enabled || !(listing.data?.exports || []).length ? T('export.empty')
+          : (listing.data.exports || []).map(e => jsxs('div', {
+              className: 'flex min-w-0 items-center gap-1.5 text-[0.6875rem]',
+              children: [reveal(e.path, e.name), jsx('span', {
+                className: 'ml-auto shrink-0 tabular-nums text-(--ui-text-tertiary)',
+                children: [fmtSize(e.size), e.mtime ? (typeof e.mtime === 'number' ? new Date(e.mtime * 1000) : new Date(e.mtime)).toLocaleString() : null].filter(Boolean).join(' · ')
+              })]
+            }, e.path))
+      })
+    ]
+  })
+}
+
 // ── Honcho Memory ───────────────────────────────────────────────────────────
 
 
@@ -1676,6 +1804,7 @@ function RepoPane() {
           jsx(HermesSettings, {}),
           jsx(HonchoSection, {}),
           jsx(DiskSection, {}),
+          jsx(ExportSection, { project, cwd }),
           jsx(EnvSection, { cwd }),
           jsx(LlmSection, {})
         ]
@@ -2115,6 +2244,40 @@ const EN = {
   "branches.loading": "reading branches from the server…",
   "branches.refresh": "Check the server again",
   "branches.open_on_web": "Open on the web",
-  "help.branches": "all branches on the server: default, local copy, ahead/behind, last commit, open PRs"
+  "help.branches": "all branches on the server: default, local copy, ahead/behind, last commit, open PRs",
+  "export.title": "Export",
+  "export.action": "Export",
+  "export.dry_run": "Dry run",
+  "export.disabled": "Export is disabled. Set export_dir in the plugin settings.",
+  "export.ready": "Ready",
+  "export.loading": "Loading export status…",
+  "export.no_project": "Open a project or a chat with a working folder.",
+  "export.directory": "Export folder",
+  "export.status_label": "Status",
+  "export.estimate": "Estimated size: {0}",
+  "export.progress": "{0} · files: {1} · {2} bytes · {3}%",
+  "export.error": "Export failed: {0}",
+  "export.work_dir": "Work folder",
+  "export.archive": "Archive",
+  "export.recent": "Recent exports",
+  "export.empty": "No exports yet.",
+  "export.refresh": "Refresh",
+  "export.reveal": "Reveal: {0}",
+  "export.started": "Export started.",
+  "export.summary": "{0} · files: {1} · estimated bytes: {2}",
+  "export.help": "export the current project; status shows progress, dry estimates without writing",
+  "export.cli_help": "export the project to a verified ZIP archive",
+  "export.dry_help": "estimate the project export without writing files",
+  "export.state.idle": "idle",
+  "export.state.running": "running",
+  "export.state.completed": "completed",
+  "export.state.dry_run": "estimate complete",
+  "export.state.error": "failed",
+  "export.step.estimate": "Estimating",
+  "export.step.collect": "Collecting files",
+  "export.step.archive": "Creating archive",
+  "export.step.verify": "Verifying",
+  "export.step.cleanup": "Cleaning up",
+  "export.invalid_request": "Invalid export request."
 }
 // @@EN-END

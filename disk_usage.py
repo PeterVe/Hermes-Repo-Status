@@ -136,6 +136,7 @@ def attribute(scratch: list[dict[str, Any]], ledger_db: Path, state_db: Path | N
     if not scratch or not ledger_db.exists():
         return
     by_name = {s["name"].lower(): s for s in scratch}
+    roots = [(os.path.normcase(os.path.abspath(s["path"])), s["name"].lower()) for s in scratch if s.get("path")]
     marker = os.sep + "cache" + os.sep + "scratch" + os.sep
     info: dict[str, dict[str, Any]] = {}
     try:
@@ -145,13 +146,13 @@ def attribute(scratch: list[dict[str, Any]], ledger_db: Path, state_db: Path | N
     except sqlite3.Error:
         return
     for path, sid, ts, cwd in rows:
-        low = (path or "").lower()
-        i = low.find(marker.lower())
-        if i < 0:
+        low = os.path.normcase(os.path.abspath(path or ""))
+        # Match the measured directory, not the first cache/scratch segment:
+        # Hermes homes and exported fixtures can themselves live in scratch.
+        matches = [(len(root), name) for root, name in roots if low == root or low.startswith(root + os.sep)]
+        if not matches:
             continue
-        name = low[i + len(marker):].split(os.sep)[0]
-        if name not in by_name:
-            continue
+        name = max(matches)[1]
         d = info.setdefault(name, {"sessions": {}, "first": ts, "last": ts, "cwds": {}})
         d["first"], d["last"] = min(d["first"], ts), max(d["last"], ts)
         if sid:

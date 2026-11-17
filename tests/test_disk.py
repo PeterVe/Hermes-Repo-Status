@@ -61,6 +61,16 @@ class DiskTests(unittest.TestCase):
         self.assertEqual(big["project_cwd"], "C:\\REPOS\\proj")
         self.assertNotIn("sessions", d["scratch"][1])
 
+    def test_attribution_inside_a_parent_scratch_directory(self):
+        nested = self.home / "cache" / "scratch" / "outer" / "home"
+        target = nested / "cache" / "scratch" / "inner" / "file.txt"
+        fill(target, 1)
+        self.led.record(ledger.build_rows("write_file", {"path": str(target)}, "{}", cwd="C:\\REPOS\\proj",
+                                          profile="d", session_id="nested-session", task_id=None))
+        data = disk_usage.measure(nested)
+        disk_usage.attribute(data["scratch"], self.led_path)
+        self.assertEqual(data["scratch"][0]["sessions"][0]["id"], "nested-session")
+
     def test_refresh_cache_and_overview(self):
         data = disk_usage.refresh(self.home, self.led_path)
         self.assertTrue(disk_usage.cache_path(self.led_path).exists())

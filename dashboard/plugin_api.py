@@ -163,6 +163,11 @@ def _settings() -> dict[str, Any]:
         "file_list_cap": int(num("file_list_cap", gitprobe.DEFAULT_FILE_CAP)),
         "host_kinds": host_kinds,
         "show_chip": bool(s.get("show_chip", True)),
+        "export_dir": str(s.get("export_dir") or "").strip(),
+        "export_include_secrets": bool(s.get("export_include_secrets", False)),
+        "export_include_scratch": bool(s.get("export_include_scratch", False)),
+        "export_scratch_cap_mb": int(num("export_scratch_cap_mb", 500)),
+        "export_keep_last": int(num("export_keep_last", 0)),
     }
 
 
@@ -173,6 +178,42 @@ def _check_cwd(cwd: str) -> Path:
     if not p.is_absolute():
         raise HTTPException(status_code=400, detail="cwd must be absolute")
     return p
+
+
+def _exporter():
+    return _load_sibling("export")
+
+
+@router.post("/export")
+async def export_start(body: dict) -> dict[str, Any]:
+    """Start one background job; settings, never the request, control output policy."""
+    body = body or {}
+    project = body.get("project")
+    directories = body.get("directories")
+    cwd = body.get("cwd")
+    if project is not None and not isinstance(project, dict):
+        raise HTTPException(status_code=400, detail=plugin_i18n.tr("export.invalid_request"))
+    if directories is not None and (not isinstance(directories, list) or
+                                    any(not isinstance(item, str) or not Path(item).is_absolute() for item in directories)):
+        raise HTTPException(status_code=400, detail=plugin_i18n.tr("export.invalid_request"))
+    if cwd is not None and (not isinstance(cwd, str) or not Path(cwd).is_absolute()):
+        raise HTTPException(status_code=400, detail=plugin_i18n.tr("export.invalid_request"))
+    if not isinstance(body.get("dry_run", False), bool):
+        raise HTTPException(status_code=400, detail=plugin_i18n.tr("export.invalid_request"))
+    return await run_in_threadpool(lambda: _exporter().start(
+        _settings(), project=project, directories=directories, cwd=cwd, dry_run=body.get("dry_run", False)))
+
+
+@router.get("/export/status")
+async def export_status() -> dict[str, Any]:
+    settings = _settings()
+    result = await run_in_threadpool(lambda: _exporter().status())
+    return {**result, "enabled": bool(settings["export_dir"]), "export_dir": settings["export_dir"]}
+
+
+@router.get("/export/list")
+async def export_list(project: str = "") -> dict[str, Any]:
+    return await run_in_threadpool(lambda: _exporter().list_exports(_settings(), project=project or None))
 
 
 @router.get("/settings")

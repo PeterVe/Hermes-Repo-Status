@@ -1,7 +1,7 @@
 manifest_version: 2
 name: repo-status
 label: Repo Status
-version: 0.5.0
+version: 0.6.0
 kind: standalone
 author: Peter Vesely
 license: MIT
@@ -27,6 +27,29 @@ provides_hooks:
   - pre_auxiliary_call
   - post_auxiliary_call
 config_schema:
+  export_dir:
+    type: string
+    default: ""
+    label: Project export folder
+    description: Empty disables export. Export writes only here; repositories remain read-only.
+  export_include_secrets:
+    type: bool
+    default: false
+    label: Include secret files in exports
+    description: Sensitive! Includes .env files, credentials and private keys, including git history.
+  export_include_scratch:
+    type: bool
+    default: false
+    label: Include project scratch files
+  export_scratch_cap_mb:
+    type: int
+    default: 500
+    label: Maximum scratch content (MB)
+  export_keep_last:
+    type: int
+    default: 0
+    label: Keep newest project exports
+    description: Zero never removes old exports. Positive values remove only this plugin's own project archives.
   check_remote:
     type: bool
     default: true
