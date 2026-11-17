@@ -1,0 +1,83 @@
+manifest_version: 2
+name: repo-status
+label: Repo Status
+version: 0.3.0
+kind: standalone
+author: Peter Vesely
+license: MIT
+homepage: https://github.com/PeterVe/Hermes-Repo-Status
+description: >
+  Read-only overview of the git repository a Hermes session works in: local
+  root and worktrees, remotes (GitHub / GitLab / other, credentials hidden),
+  git user identity and its scope, current branch and upstream, last commit,
+  whether the branch matches the server (git ls-remote, never fetch), and the
+  uncommitted files with +/- counts. Tool repo_status, slash command /repo,
+  CLI `hermes repo-status`, and a Hermes Desktop panel + status-bar chip.
+requires_hermes: ">=0.22.5"
+tags: [git, github, gitlab, status, desktop]
+provides_tools:
+  - repo_status
+  - hermes_touched_paths
+provides_hooks:
+  - post_tool_call
+  - pre_api_request
+  - post_api_request
+  - api_request_error
+  - pre_auxiliary_call
+  - post_auxiliary_call
+config_schema:
+  check_remote:
+    type: bool
+    default: true
+    label: Overovať server
+    description: Porovnať vetvu so serverom cez git ls-remote (read-only, bez fetch).
+  remote_cache_seconds:
+    type: int
+    default: 60
+    label: Cache overenia servera (s)
+    description: Ako dlho platí výsledok overenia servera, kým sa zavolá znova.
+  remote_timeout_seconds:
+    type: int
+    default: 8
+    label: Timeout servera (s)
+  file_list_cap:
+    type: int
+    default: 200
+    label: Max. počet súborov v zozname
+  host_kinds:
+    type: dict
+    default: {}
+    label: Vlastné git servery
+    description: 'Hostname → typ, napr. {"git.firma.sk": "forgejo"}. Typy: github, gitlab, forgejo, bitbucket, azure, other.'
+  work_dirs:
+    type: list
+    default: [".hermes/"]
+    label: Pracovné priečinky Hermesa v repe
+    description: Necommitnuté súbory v týchto priečinkoch (plány, náčrty, podklady) sa ukazujú oddelene a nepočítajú sa do verdiktu „všetko commitnuté“ ani do čipu.
+  show_chip:
+    type: bool
+    default: true
+    label: Čip v status bare (Desktop)
+  track_writes:
+    type: bool
+    default: true
+    label: Zaznamenávať, kam Hermes zapisuje
+    description: Hook post_tool_call ukladá cesty z write_file, patch a MCP súborových nástrojov a príkazy terminal/execute_code (len cesty a skrátený príkaz, nikdy obsah) do spoločného ledgeru plugin-shared/repo-status/ledger.db.
+  ledger_retention_days:
+    type: int
+    default: 90
+    label: Uchovávať záznamy (dni)
+  llm_log:
+    type: bool
+    default: true
+    label: Zaznamenávať volania LLM providerov
+    description: Metadáta každého volania (provider, model, session, tokeny, čas, chyby) do plugin-shared/repo-status/llm.db. API kľúče Hermes pred pluginmi vždy skryje.
+  llm_capture_content:
+    type: bool
+    default: false
+    label: Ukladať aj obsah volaní (request/response)
+    description: Citlivé a objemné – prompty obsahujú celý kontext vrátane prečítaných súborov. Hermes obsah skracuje (8 000 znakov na reťazec, 50 000 na volanie), plugin navyše maskuje tajomstvá. Uchováva sa len krátko.
+  llm_content_retention_days:
+    type: int
+    default: 7
+    label: Uchovávať obsah volaní (dni)
