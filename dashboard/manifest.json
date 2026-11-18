@@ -3,7 +3,7 @@
   "label": "Repo Status",
   "description": "Read-only git status backend for the Repo Status desktop panel.",
   "icon": "GitBranch",
-  "version": "0.3.0",
+  "version": "0.6.1",
   "tab": { "path": "/repo-status", "hidden": true },
   "entry": "dist/index.js",
   "api": "plugin_api.py"

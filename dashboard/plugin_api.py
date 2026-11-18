@@ -216,6 +216,47 @@ async def export_list(project: str = "") -> dict[str, Any]:
     return await run_in_threadpool(lambda: _exporter().list_exports(_settings(), project=project or None))
 
 
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _yaml_version(plugin_yaml: Path) -> str | None:
+    """The top-level ``version:`` of a plugin.yaml, without needing a YAML parser."""
+    try:
+        for line in plugin_yaml.read_text(encoding="utf-8-sig").splitlines():
+            if line.startswith("version:"):
+                return line.split(":", 1)[1].strip().strip("'\"") or None
+    except OSError:
+        return None
+    return None
+
+
+def plugin_copies(root: Path) -> list[dict[str, Any]]:
+    """Every installed copy of this plugin: the shared one and each profile's own (``--clone``)."""
+    out = []
+    shared = root / "plugins" / "repo-status"
+    if (shared / "plugin.yaml").is_file():
+        out.append({"profile": "default", "version": _yaml_version(shared / "plugin.yaml")})
+    try:
+        profiles = sorted(p for p in (root / "profiles").iterdir() if p.is_dir())
+    except OSError:
+        profiles = []
+    for p in profiles:
+        copy = p / "plugins" / "repo-status" / "plugin.yaml"
+        if copy.is_file():
+            out.append({"profile": p.name, "version": _yaml_version(copy)})
+    return out
+
+
+@router.get("/version")
+def version() -> dict[str, Any]:
+    """Version of the backend the gateway actually loaded, so the panel can spot a stale gateway."""
+    return {
+        "version": _yaml_version(_PLUGIN_ROOT / "plugin.yaml"),
+        "profile": ledger.current_profile(),
+        "copies": plugin_copies(ledger.hermes_root()),
+    }
+
+
 @router.get("/settings")
 def settings() -> dict[str, Any]:
     s = _settings()

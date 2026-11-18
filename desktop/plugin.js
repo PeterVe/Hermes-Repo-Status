@@ -304,6 +304,109 @@ function errText(error) {
   return msg
 }
 
+// ── version check: panel vs the backend the gateway really loaded ──────────────
+// Bumped together with plugin.yaml and dashboard/manifest.json (tests/test_version.py).
+const PANEL_VERSION = '0.6.1'
+const PLUGIN_UPDATE = 'hermes plugins update repo-status'
+const GATEWAY_RESTART = 'hermes gateway restart'
+
+/** {kind, backend, stale}: ok | profiles | outdated | not_loaded | unreachable | checking */
+function useVersionState() {
+  const version = useQuery({ queryKey: [PLUGIN_ID, 'version'], queryFn: () => api.rest('/version'), enabled: Boolean(api), staleTime: 60_000, retry: 1 })
+  const missing = /\b404\b|not found/i.test(String(version.error?.message || version.error || ''))
+  // /settings exists since the first release: answers → old backend, 404 too → backend not loaded at all
+  const legacy = useQuery({ queryKey: [PLUGIN_ID, 'settings'], queryFn: () => api.rest('/settings'), enabled: Boolean(api && missing), staleTime: 60_000, retry: 1 })
+  if (version.data) {
+    const backend = version.data.version || '?'
+    const stale = (version.data.copies || []).filter(c => c.version && c.version !== PANEL_VERSION)
+    if (backend !== PANEL_VERSION) return { kind: 'outdated', backend, stale }
+    return { kind: stale.length ? 'profiles' : 'ok', backend, stale }
+  }
+  if (version.isError) {
+    if (!missing) return { kind: 'unreachable', backend: null, stale: [], error: errMsg(version.error) }
+    if (legacy.data) return { kind: 'outdated', backend: null, stale: [] }
+    if (legacy.isError) return /\b404\b|not found/i.test(errMsg(legacy.error)) ? { kind: 'not_loaded', backend: null, stale: [] } : { kind: 'unreachable', backend: null, stale: [], error: errMsg(legacy.error) }
+  }
+  return { kind: 'checking', backend: null, stale: [] }
+}
+
+function errMsg(error) {
+  return String(error?.message || error || '')
+}
+
+const VERSION_TONE = { ok: 'text-(--ui-text-tertiary)', checking: 'text-(--ui-text-tertiary)', profiles: 'text-amber-500', outdated: 'text-destructive', not_loaded: 'text-destructive', unreachable: 'text-destructive' }
+
+function versionSteps(v) {
+  const profileUpdate = c => (c.profile === 'default' ? PLUGIN_UPDATE : `hermes -p ${c.profile} plugins update repo-status`)
+  if (v.kind === 'outdated') return { commands: [PLUGIN_UPDATE, GATEWAY_RESTART], rescan: true, logs: 'hermes logs gateway -n 300 --level WARNING' }
+  if (v.kind === 'not_loaded') return { commands: ['hermes plugins list', 'hermes plugins enable repo-status', GATEWAY_RESTART], rescan: true, logs: 'hermes logs gateway -n 300 --level WARNING' }
+  if (v.kind === 'unreachable') return { commands: ['hermes gateway status', GATEWAY_RESTART], restartDesktop: true, logs: 'hermes logs desktop -n 100' }
+  if (v.kind === 'profiles') return { commands: [...new Set(v.stale.map(profileUpdate)), GATEWAY_RESTART], rescan: true }
+  return { commands: [] }
+}
+
+function CopyCommand({ command }) {
+  const [copied, setCopied] = useState(false)
+  return jsxs('div', {
+    className: 'flex items-center gap-1',
+    children: [
+      jsx('code', { className: 'min-w-0 flex-1 truncate rounded bg-(--chrome-action-hover) px-1.5 py-0.5 font-mono text-[0.6875rem] text-foreground', title: command, children: command }),
+      jsx(Tip, {
+        label: copied ? T('version.copied') : T('version.copy'),
+        children: jsx(Button, {
+          variant: 'ghost',
+          size: 'icon-xs',
+          'aria-label': T('version.copy'),
+          onClick: () => {
+            void navigator.clipboard?.writeText(command).then(() => {
+              setCopied(true)
+              setTimeout(() => setCopied(false), 1500)
+            })
+          },
+          children: jsx(Codicon, { name: copied ? 'check' : 'copy', size: '0.75rem' })
+        })
+      })
+    ]
+  })
+}
+
+/** "Panel 0.6.1 · backend 0.6.1"; red/amber when they differ, a click opens the fix-it steps. */
+function VersionLine({ v, open, onToggle }) {
+  const backend =
+    v.kind === 'checking' ? '…' : v.kind === 'not_loaded' ? T('version.not_loaded') : v.kind === 'unreachable' ? T('version.unreachable') : v.backend || T('version.older')
+  const text = T('version.line', PANEL_VERSION, backend)
+  const tone = VERSION_TONE[v.kind] || VERSION_TONE.ok
+  if (v.kind === 'ok' || v.kind === 'checking') return jsx('div', { className: `truncate text-[0.625rem] ${tone}`, children: text })
+  return jsx(Tip, {
+    label: T('version.help'),
+    children: jsxs('button', {
+      type: 'button',
+      className: `flex max-w-full items-center gap-1 text-left text-[0.625rem] underline decoration-dotted underline-offset-2 ${tone}`,
+      onClick: onToggle,
+      'aria-expanded': open,
+      children: [jsx(Codicon, { name: open ? 'chevron-down' : 'warning', size: '0.65rem' }), jsx('span', { className: 'truncate', children: text })]
+    })
+  })
+}
+
+function VersionGuide({ v }) {
+  const steps = versionSteps(v)
+  const why = v.kind === 'profiles' ? T('version.why.profiles', v.stale.map(c => `${c.profile} ${c.version}`).join(', ')) : T(`version.why.${v.kind}`)
+  return jsxs('div', {
+    className: 'mx-3 mb-2 space-y-1.5 rounded border border-(--ui-border) px-2 py-2 text-[0.6875rem]',
+    children: [
+      jsx('div', { className: 'text-foreground', children: why }),
+      v.error ? jsx('div', { className: 'truncate text-(--ui-text-tertiary)', title: v.error, children: v.error }) : null,
+      jsx('div', { className: 'text-(--ui-text-tertiary)', children: T('version.run') }),
+      ...steps.commands.map(c => jsx(CopyCommand, { command: c }, c)),
+      steps.rescan ? jsx('div', { className: 'text-(--ui-text-tertiary)', children: T('version.rescan') }) : null,
+      steps.restartDesktop ? jsx('div', { className: 'text-(--ui-text-tertiary)', children: T('version.restart_desktop') }) : null,
+      steps.logs ? jsx('div', { className: 'text-(--ui-text-tertiary)', children: T('version.logs') }) : null,
+      steps.logs ? jsx(CopyCommand, { command: steps.logs }) : null
+    ]
+  })
+}
+
 // Slovak plural: 1 provider · 2–4 provideri · 5+ providerov (forms = [one, few, many]).
 function plural(n, [one, few, many]) {
   return `${n} ${n === 1 ? one : n >= 2 && n <= 4 ? few : many}`
@@ -1729,6 +1832,8 @@ function RepoPane() {
   usePluginI18n(PLUGIN_ID) // re-render the whole pane when the display language changes
   const r = useRepo()
   const { cwd, project, local, data, isRepo, remoteCheck, summary } = r
+  const version = useVersionState()
+  const [versionOpen, setVersionOpen] = useState(false)
 
   const header = jsxs('div', {
     className: 'flex items-center gap-2 px-3 py-2',
@@ -1757,7 +1862,8 @@ function RepoPane() {
                 : summary.current
                   ? T('verdict.all_current')
                   : summary.reasons.map(x => L('reason', x)).join(' · ')
-          })
+          }),
+          jsx(VersionLine, { v: version, open: versionOpen, onToggle: () => setVersionOpen(o => !o) })
         ]
       }),
       jsx(Tip, {
@@ -1794,6 +1900,7 @@ function RepoPane() {
     className: 'flex h-full min-h-0 flex-col',
     children: [
       header,
+      versionOpen && !['ok', 'checking'].includes(version.kind) ? jsx(VersionGuide, { v: version }) : null,
       jsxs('div', {
         className: 'min-h-0 flex-1 overflow-y-auto',
         children: [
@@ -2140,7 +2247,7 @@ const EN = {
   "source.subagent": "Subagent",
   "source.delegate": "Subagent",
   "ui.server_check_failed": "Repo Status: the server could not be checked",
-  "ui.backend_outdated": "The plugin backend is older than the panel – restart the Hermes gateway.",
+  "ui.backend_outdated": "This function is missing in the plugin backend – click the red version line at the top of the panel.",
   "ui.backend_unavailable": "Backend unavailable: {0}. Is the plugin enabled in config.yaml (plugins.enabled)?",
   "ui.collapse": "Collapse",
   "ui.expand": "Expand",
@@ -2278,6 +2385,21 @@ const EN = {
   "export.step.archive": "Creating archive",
   "export.step.verify": "Verifying",
   "export.step.cleanup": "Cleaning up",
-  "export.invalid_request": "Invalid export request."
+  "export.invalid_request": "Invalid export request.",
+  "version.line": "Panel {0} · backend {1}",
+  "version.not_loaded": "not loaded",
+  "version.unreachable": "not responding",
+  "version.older": "older",
+  "version.help": "Click for instructions",
+  "version.why.outdated": "The Hermes gateway runs an older plugin backend than this panel.",
+  "version.why.not_loaded": "The Hermes gateway did not load the plugin backend (the plugin is not enabled, or loading failed).",
+  "version.why.unreachable": "Hermes Desktop cannot reach the Hermes gateway.",
+  "version.why.profiles": "Profiles with an older copy of the plugin: {0}",
+  "version.run": "Run in a terminal:",
+  "version.rescan": "Then in Hermes Desktop: Capabilities → Plugins → Rescan.",
+  "version.restart_desktop": "If it still does not respond, close and reopen Hermes Desktop.",
+  "version.logs": "If the problem persists, look for the reason in the log:",
+  "version.copy": "Copy",
+  "version.copied": "Copied"
 }
 // @@EN-END

@@ -45,6 +45,8 @@ hermes gateway restart        # waits for live sessions; --yes interrupts them
 
 Then **Capabilities → Plugins → Rescan** in Desktop.
 
+The panel header shows `Panel x.y.z · backend x.y.z`. The line turns red when the gateway runs an older backend, did not load it, or does not respond, and amber when a profile (`hermes profile create --clone`) keeps an older copy of the plugin. Click it for the exact commands to fix it.
+
 ### Data
 
 Each machine keeps its own records in `HERMES_HOME\plugin-shared\repo-status\` (`ledger.db`, `llm.db`, `disk.json`). Nothing is sent anywhere.
